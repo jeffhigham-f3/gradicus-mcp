@@ -1,0 +1,22 @@
+{
+  "name": "gradicus-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for querying student grades from Gradicus",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^11.9.1",
+    "playwright": "^1.59.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.2"
+  }
+}
