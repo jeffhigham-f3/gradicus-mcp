@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { GradicusScraper } from "./scraper.js";
 import { GradicusCache } from "./cache.js";
-import { StudentReport, StudentSchedule } from "./types.js";
+import { StudentReport, StudentSchedule, DemeritHistory, AttendanceReport } from "./types.js";
 
 const server = new McpServer({
   name: "gradicus",
@@ -342,6 +342,105 @@ server.tool(
 );
 
 server.tool(
+  "get_demerit_history",
+  "Get a student's demerit history including infractions, dates, issuing teachers, and per-GP totals.",
+  {
+    student_name: z.string().optional().describe("Student name."),
+    school_year: z.string().optional().describe("School year. Omit for current year."),
+  },
+  async ({ student_name, school_year }) => {
+    try {
+      // Try cache first
+      let studentId: string | undefined;
+      if (student_name) {
+        const cached = cache.getCachedStudents();
+        const match = cached.find(s => s.name.toLowerCase().includes(student_name.toLowerCase()));
+        if (match) studentId = match.id;
+      }
+
+      if (studentId && cache.isFresh(studentId, "demerits", school_year)) {
+        const cached = cache.getCachedDemerits(studentId, school_year);
+        if (cached) {
+          const meta = cache.getCacheMetadata(studentId, "demerits", school_year);
+          return { content: [{ type: "text", text: `${cacheLabel(meta)}\n\n${formatDemerits(cached)}` }] };
+        }
+      }
+
+      // Live fetch
+      if (scraper.isLoggedIn()) {
+        const history = await scraper.getDemeritHistory(student_name, school_year);
+        cache.cacheDemerits(history);
+        return { content: [{ type: "text", text: `[LIVE]\n\n${formatDemerits(history)}` }] };
+      }
+
+      // Stale cache fallback
+      if (studentId) {
+        const cached = cache.getCachedDemerits(studentId, school_year);
+        if (cached) {
+          const meta = cache.getCacheMetadata(studentId, "demerits", school_year);
+          return { content: [{ type: "text", text: `[OFFLINE ${cacheAge(meta.fetchedAt)}]\n\n${formatDemerits(cached)}` }] };
+        }
+      }
+
+      throw new Error("No demerit data. Login and sync first.");
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "get_attendance",
+  "Get a student's detailed attendance history including absences, tardies, early dismissals, reasons, and total instructional time lost.",
+  {
+    student_name: z.string().optional().describe("Student name."),
+    school_year: z.string().optional().describe("School year. Omit for current year."),
+  },
+  async ({ student_name, school_year }) => {
+    try {
+      let studentId: string | undefined;
+      if (student_name) {
+        const cached = cache.getCachedStudents();
+        const match = cached.find(s => s.name.toLowerCase().includes(student_name.toLowerCase()));
+        if (match) studentId = match.id;
+      }
+
+      if (studentId && cache.isFresh(studentId, "attendance_detail", school_year)) {
+        const cached = cache.getCachedAttendance(studentId, school_year);
+        if (cached) {
+          const meta = cache.getCacheMetadata(studentId, "attendance_detail", school_year);
+          return { content: [{ type: "text", text: `${cacheLabel(meta)}\n\n${formatAttendance(cached)}` }] };
+        }
+      }
+
+      if (scraper.isLoggedIn()) {
+        const report = await scraper.getAttendance(student_name, school_year);
+        cache.cacheAttendance(report);
+        return { content: [{ type: "text", text: `[LIVE]\n\n${formatAttendance(report)}` }] };
+      }
+
+      if (studentId) {
+        const cached = cache.getCachedAttendance(studentId, school_year);
+        if (cached) {
+          const meta = cache.getCacheMetadata(studentId, "attendance_detail", school_year);
+          return { content: [{ type: "text", text: `[OFFLINE ${cacheAge(meta.fetchedAt)}]\n\n${formatAttendance(cached)}` }] };
+        }
+      }
+
+      throw new Error("No attendance data. Login and sync first.");
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
   "debug_page",
   "Return the raw HTML of the current student report page for debugging selectors.",
   {},
@@ -549,6 +648,82 @@ function formatSchedule(schedule: StudentSchedule): string {
     if (e.semester) line += ` (${e.semester})`;
     line += `\n         ${e.teacher} | ${e.schedule} | Room ${e.room}`;
     if (e.courseId) line += ` | Course: ${e.courseId}`;
+    lines.push(line);
+  }
+
+  return lines.join("\n");
+}
+
+function formatAttendance(report: AttendanceReport): string {
+  const lines: string[] = [];
+  const s = report.student;
+
+  lines.push(`Attendance Report for ${s.name}`);
+  lines.push(`School Year: ${report.schoolYear}`);
+  lines.push(DIVIDER);
+
+  const t = report.totals;
+  lines.push("SUMMARY:");
+  lines.push(`  Absences: ${t.absentExcused + t.absentUnexcused} (${t.absentExcused} excused, ${t.absentUnexcused} unexcused)`);
+  lines.push(`  Tardies: ${t.tardyExcused + t.tardyUnexcused} (${t.tardyExcused} excused, ${t.tardyUnexcused} unexcused)`);
+  lines.push(`  Early Dismissals: ${t.earlyDismissalExcused + t.earlyDismissalUnexcused} (${t.earlyDismissalExcused} excused, ${t.earlyDismissalUnexcused} unexcused)`);
+  if (t.totalTimeLost) {
+    lines.push(`  Total Instructional Time Lost: ${t.totalTimeLost}`);
+  }
+
+  if (report.absencesAndTardies.length > 0) {
+    lines.push(`\n${DIVIDER}`);
+    lines.push("ABSENCES & TARDIES:");
+    for (const e of report.absencesAndTardies) {
+      let line = `  [${e.date}] ${e.type}`;
+      if (e.time) line += ` at ${e.time}`;
+      if (e.reason) line += ` — ${e.reason}`;
+      if (e.timeLost) line += ` (${e.timeLost} lost)`;
+      lines.push(line);
+    }
+  }
+
+  if (report.earlyDismissals.length > 0) {
+    lines.push(`\n${DIVIDER}`);
+    lines.push("EARLY DISMISSALS:");
+    for (const e of report.earlyDismissals) {
+      let line = `  [${e.date}] ${e.type}`;
+      if (e.time) line += ` at ${e.time}`;
+      if (e.reason) line += ` — ${e.reason}`;
+      if (e.timeLost) line += ` (${e.timeLost} lost)`;
+      lines.push(line);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatDemerits(history: DemeritHistory): string {
+  const lines: string[] = [];
+  const s = history.student;
+
+  lines.push(`Demerit History for ${s.name}`);
+  lines.push(`School Year: ${history.schoolYear} | View: ${history.gradingPeriod === "all" ? "Full Year" : `GP${history.gradingPeriod}`}`);
+  lines.push(DIVIDER);
+
+  const { summary } = history;
+  if (summary.gp1 || summary.gp2 || summary.gp3 || summary.gp4) {
+    lines.push(`Per-GP Totals: GP1: ${summary.gp1} | GP2: ${summary.gp2} | GP3: ${summary.gp3} | GP4: ${summary.gp4} | Year Total: ${summary.gp1 + summary.gp2 + summary.gp3 + summary.gp4}`);
+    lines.push("");
+  }
+
+  if (history.entries.length === 0) {
+    lines.push("No demerits found.");
+    return lines.join("\n");
+  }
+
+  lines.push(`Total entries: ${history.entries.length}`);
+  lines.push("");
+
+  for (const e of history.entries) {
+    let line = `  [${e.date}] ${e.infraction}`;
+    if (e.detail) line += ` — ${e.detail}`;
+    line += `\n    Issued by: ${e.issuingTeacher} | Demerits: ${e.demeritsIssued} | GP Total: ${e.gpTotal} | Year Total: ${e.yearTotal}`;
     lines.push(line);
   }
 

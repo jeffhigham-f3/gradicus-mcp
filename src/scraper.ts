@@ -9,6 +9,12 @@ import {
   StudentReport,
   ScheduleEntry,
   StudentSchedule,
+  DemeritEntry,
+  DemeritSummary,
+  DemeritHistory,
+  AttendanceEntry,
+  AttendanceTotals,
+  AttendanceReport,
 } from "./types.js";
 
 const BASE_URL = "https://gradicus.schoolclassics.org";
@@ -151,6 +157,297 @@ export class GradicusScraper {
 
     const html = await page.content();
     return this.parseSchedule(html);
+  }
+
+  async getDemeritHistory(studentName?: string, schoolYear?: string): Promise<DemeritHistory> {
+    this.ensureLoggedIn();
+    const page = this.page!;
+
+    let studentId = "";
+    if (studentName) {
+      await this.navigateToReport();
+      const students = await this.listStudents();
+      const match = students.find((s) =>
+        s.name.toLowerCase().includes(studentName.toLowerCase())
+      );
+      if (!match) {
+        throw new Error(`Student "${studentName}" not found.`);
+      }
+      studentId = match.id;
+    }
+
+    // Build URL with displaygp=all to get full year in one request
+    const params = new URLSearchParams();
+    if (studentId) params.set("studentid", studentId);
+    params.set("displaygp", "all");
+    if (schoolYear) params.set("schoolyear", schoolYear);
+
+    await page.goto(`${BASE_URL}/demerit-history.php?${params}`, {
+      waitUntil: "networkidle",
+    });
+
+    const html = await page.content();
+    return this.parseDemeritHistory(html, schoolYear);
+  }
+
+  private parseDemeritHistory(html: string, schoolYear?: string): DemeritHistory {
+    const student: Student = { id: "unknown", name: "Unknown" };
+
+    const selMatch = html.match(
+      /<option\s+value="([^"]+)"\s+selected="selected">([^<]+)<\/option>/
+    );
+    if (selMatch) {
+      student.id = selMatch[1];
+      student.name = selMatch[2].trim();
+    }
+
+    const detectedYear = html.match(
+      /<option\s+value="(\d{4}-\d{4})"\s+selected="selected">/
+    );
+    const year = schoolYear || detectedYear?.[1] || this.getCurrentYear();
+
+    // Parse GP summary: "GP1 ▶ 11"
+    const summary: DemeritSummary = { gp1: 0, gp2: 0, gp3: 0, gp4: 0 };
+    const gpSummaryRegex = /GP(\d)\s*[►▶]\s*(\d+)/g;
+    let gpMatch;
+    while ((gpMatch = gpSummaryRegex.exec(html)) !== null) {
+      const gpNum = parseInt(gpMatch[1]);
+      const count = parseInt(gpMatch[2]);
+      if (gpNum === 1) summary.gp1 = count;
+      else if (gpNum === 2) summary.gp2 = count;
+      else if (gpNum === 3) summary.gp3 = count;
+      else if (gpNum === 4) summary.gp4 = count;
+    }
+
+    // Detect which GP filter is active
+    const checkedGp = html.match(
+      /name="displaygp"[^>]*checked="checked"[^>]*value="(\w+)"/
+    );
+    const gradingPeriod = checkedGp ? checkedGp[1] : "all";
+
+    // Parse individual demerit rows
+    const entries: DemeritEntry[] = [];
+    const rowRegex = /<tr\s+id="[a-f0-9]+"[^>]*>([\s\S]*?)<\/tr>/g;
+    let rowMatch2;
+    while ((rowMatch2 = rowRegex.exec(html)) !== null) {
+      const rowHtml = rowMatch2[1];
+      const cells = this.extractDemeritCells(rowHtml);
+      if (cells.length < 12) continue;
+
+      // cells[0] = photo/link, cells[1] = date, cells[2] = homeroom, cells[3] = issuing teacher
+      // cells[4] = infraction (HTML), cells[5] = demerits issued
+      // cells[6-8] = GP minor/major/total, cells[9-11] = year minor/major/total
+
+      const infractionHtml = cells[4];
+      const boldMatch = infractionHtml.match(/<b>([^<]+)<\/b>/);
+      const infraction = boldMatch ? boldMatch[1].trim() : "";
+      const detailText = infractionHtml
+        .replace(/<b>[^<]+<\/b>/, "")
+        .replace(/<br\s*\/?>/gi, "")
+        .replace(/<[^>]+>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .trim();
+
+      entries.push({
+        date: this.stripHtml(cells[1]).trim(),
+        homeroomTeacher: this.stripHtml(cells[2]).trim(),
+        issuingTeacher: this.stripHtml(cells[3]).trim(),
+        infraction,
+        detail: detailText,
+        demeritsIssued: parseInt(this.stripHtml(cells[5]).trim()) || 0,
+        gpMinor: parseInt(this.stripHtml(cells[6]).trim()) || 0,
+        gpMajor: parseInt(this.stripHtml(cells[7]).trim()) || 0,
+        gpTotal: parseInt(this.stripHtml(cells[8]).trim()) || 0,
+        yearMinor: parseInt(this.stripHtml(cells[9]).trim()) || 0,
+        yearMajor: parseInt(this.stripHtml(cells[10]).trim()) || 0,
+        yearTotal: parseInt(this.stripHtml(cells[11]).trim()) || 0,
+      });
+    }
+
+    return { student, schoolYear: year, gradingPeriod, summary, entries };
+  }
+
+  private extractDemeritCells(rowHtml: string): string[] {
+    const cells: string[] = [];
+    const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+    let m;
+    while ((m = cellRegex.exec(rowHtml)) !== null) {
+      cells.push(m[1]);
+    }
+    return cells;
+  }
+
+  async getAttendance(studentName?: string, schoolYear?: string): Promise<AttendanceReport> {
+    this.ensureLoggedIn();
+    const page = this.page!;
+
+    let studentId = "";
+    if (studentName) {
+      await this.navigateToReport();
+      const students = await this.listStudents();
+      const match = students.find((s) =>
+        s.name.toLowerCase().includes(studentName.toLowerCase())
+      );
+      if (!match) {
+        throw new Error(`Student "${studentName}" not found.`);
+      }
+      studentId = match.id;
+    }
+
+    const params = new URLSearchParams();
+    if (studentId) params.set("studentid", studentId);
+    if (schoolYear) params.set("schoolyear", schoolYear);
+
+    await page.goto(`${BASE_URL}/student-attendance.php?${params}`, {
+      waitUntil: "networkidle",
+    });
+
+    const html = await page.content();
+    return this.parseAttendance(html, schoolYear);
+  }
+
+  private parseAttendance(html: string, schoolYear?: string): AttendanceReport {
+    const student: Student = { id: "unknown", name: "Unknown" };
+
+    const selMatch = html.match(
+      /<option\s+value="([^"]+)"\s+selected="selected">([^<]+)<\/option>/
+    );
+    if (selMatch) {
+      student.id = selMatch[1];
+      student.name = selMatch[2].trim();
+    }
+
+    const detectedYear = html.match(
+      /<option\s+value="(\d{4}-\d{4})"\s+selected="selected">/
+    );
+    const year = schoolYear || detectedYear?.[1] || this.getCurrentYear();
+
+    // Parse Absences and Tardies section
+    const absencesSection = this.extractSection(html, "Absences and Tardies", "Early Dismissals");
+    const absencesAndTardies = this.parseAttendanceEntries(absencesSection, "absence");
+
+    // Parse Early Dismissals section
+    const dismissalSection = this.extractSection(html, "Early Dismissals", "Total learning time lost");
+    const earlyDismissals = this.parseAttendanceEntries(dismissalSection, "dismissal");
+
+    // Parse totals
+    const totals = this.parseAttendanceTotals(html);
+
+    return { student, schoolYear: year, absencesAndTardies, earlyDismissals, totals };
+  }
+
+  private extractSection(html: string, startMarker: string, endMarker: string): string {
+    const startIdx = html.indexOf(`<b>${startMarker}</b>`);
+    const endIdx = html.indexOf(endMarker, startIdx > -1 ? startIdx : 0);
+    if (startIdx === -1) return "";
+    return html.substring(startIdx, endIdx > -1 ? endIdx : html.length);
+  }
+
+  private parseAttendanceEntries(sectionHtml: string, type: string): AttendanceEntry[] {
+    const entries: AttendanceEntry[] = [];
+    if (!sectionHtml) return entries;
+
+    // Each entry row has: date, type display, time, reason, time lost
+    // Rows start with a date like "Apr 06, 2026" in a <td>
+    const dateRegex = /(\w{3}\s+\d{2},\s+\d{4})/;
+
+    const rowRegex = /(<tr>|<tr\s+bgcolor[^>]*>)\s*([\s\S]*?)\s*<\/tr>/g;
+    let match;
+    while ((match = rowRegex.exec(sectionHtml)) !== null) {
+      const rowHtml = match[2];
+
+      // Skip header/totals/form rows
+      if (rowHtml.includes("tableheader") || rowHtml.includes("<b>Totals</b>") ||
+          rowHtml.includes("newrownextsibling") || rowHtml.includes("background-color:#ddd")) continue;
+
+      const dateMatch = rowHtml.match(dateRegex);
+      if (!dateMatch) continue;
+
+      // Extract type from display div
+      let entryType = "";
+      const typeMatch = rowHtml.match(/display:inline;">\s*(\w[\w\s]*?)\s*<\/div>/);
+      if (typeMatch) entryType = typeMatch[1].trim();
+
+      // Extract time (arrival time or dismissal time)
+      let time = "";
+      const timeMatch = rowHtml.match(/display:inline;;">\s*([\d:]+\s*[ap]m)\s*<\/div>/);
+      if (timeMatch) time = timeMatch[1].trim();
+
+      // Extract reason
+      let reason = "";
+      const reasonMatch = rowHtml.match(/id="reasondisplay[^"]*"[^>]*>\s*(\w[\w\s/()]*?)\s*<\/div>/);
+      if (reasonMatch) reason = reasonMatch[1].trim();
+      if (reason === "noreason") reason = "";
+
+      // Extract time lost
+      let timeLost = "";
+      const timeLostMatch = rowHtml.match(/id="(?:atttimelost|timelost)-\d+">\s*([\d.]+\s*minutes)\s*<\/span>/);
+      if (timeLostMatch) timeLost = timeLostMatch[1].trim();
+
+      entries.push({
+        date: dateMatch[1],
+        type: entryType || (type === "dismissal" ? "Early Dismissal" : "Unknown"),
+        time,
+        reason,
+        timeLost,
+      });
+    }
+
+    return entries;
+  }
+
+  private parseAttendanceTotals(html: string): AttendanceTotals {
+    const totals: AttendanceTotals = {
+      absentExcused: 0,
+      absentUnexcused: 0,
+      tardyExcused: 0,
+      tardyUnexcused: 0,
+      earlyDismissalExcused: 0,
+      earlyDismissalUnexcused: 0,
+      totalTimeLost: "",
+    };
+
+    const absExc = html.match(/Absent Excused:\s*([\d-]+)/);
+    if (absExc && absExc[1] !== "-") totals.absentExcused = parseInt(absExc[1]);
+
+    const absUnexc = html.match(/Absent Unexcused:\s*(\d+)/);
+    if (absUnexc) totals.absentUnexcused = parseInt(absUnexc[1]);
+
+    // Sum tardy counts from multiple sections
+    const tardyExcMatches = html.match(/Tardy Excused:\s*([\d-]+)/g);
+    if (tardyExcMatches) {
+      for (const m of tardyExcMatches) {
+        const v = m.match(/(\d+)/);
+        if (v) totals.tardyExcused += parseInt(v[1]);
+      }
+    }
+
+    const tardyUnexcMatches = html.match(/Tardy Unexcused:\s*(\d+)/g);
+    if (tardyUnexcMatches) {
+      for (const m of tardyUnexcMatches) {
+        const v = m.match(/(\d+)/);
+        if (v) totals.tardyUnexcused += parseInt(v[1]);
+      }
+    }
+
+    const edExc = html.match(/Early Di[sm]issal Excused:\s*(\d+)/);
+    if (edExc) totals.earlyDismissalExcused = parseInt(edExc[1]);
+
+    const edUnexc = html.match(/Early Dismissal Unexcused:\s*(\d+)/);
+    if (edUnexc) totals.earlyDismissalUnexcused = parseInt(edUnexc[1]);
+
+    const totalLost = html.match(/Total learning time lost:\s*([^<]+)</);
+    if (totalLost) totals.totalTimeLost = totalLost[1].trim();
+
+    return totals;
+  }
+
+  private getCurrentYear(): string {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth() + 1;
+    if (month >= 8) return `${year}-${year + 1}`;
+    return `${year - 1}-${year}`;
   }
 
   async getPageContent(): Promise<string> {

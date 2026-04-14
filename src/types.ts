@@ -58,6 +58,62 @@ export interface AssignmentDetail {
   date: string;
 }
 
+export interface DemeritEntry {
+  date: string;
+  homeroomTeacher: string;
+  issuingTeacher: string;
+  infraction: string;
+  detail: string;
+  demeritsIssued: number;
+  gpMinor: number;
+  gpMajor: number;
+  gpTotal: number;
+  yearMinor: number;
+  yearMajor: number;
+  yearTotal: number;
+}
+
+export interface DemeritSummary {
+  gp1: number;
+  gp2: number;
+  gp3: number;
+  gp4: number;
+}
+
+export interface DemeritHistory {
+  student: Student;
+  schoolYear: string;
+  gradingPeriod: string;
+  summary: DemeritSummary;
+  entries: DemeritEntry[];
+}
+
+export interface AttendanceEntry {
+  date: string;
+  type: string;
+  time: string;
+  reason: string;
+  timeLost: string;
+}
+
+export interface AttendanceTotals {
+  absentExcused: number;
+  absentUnexcused: number;
+  tardyExcused: number;
+  tardyUnexcused: number;
+  earlyDismissalExcused: number;
+  earlyDismissalUnexcused: number;
+  totalTimeLost: string;
+}
+
+export interface AttendanceReport {
+  student: Student;
+  schoolYear: string;
+  absencesAndTardies: AttendanceEntry[];
+  earlyDismissals: AttendanceEntry[];
+  totals: AttendanceTotals;
+}
+
 export interface ScheduleEntry {
   period: string;
   subject: string;

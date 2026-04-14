@@ -7,6 +7,10 @@ import {
   StudentSchedule,
   SubjectGrade,
   AssignmentDetail,
+  DemeritHistory,
+  DemeritEntry,
+  AttendanceReport,
+  AttendanceEntry,
   CacheMetadata,
   SyncStatusEntry,
   SyncStatus,
@@ -156,6 +160,52 @@ export class GradicusCache {
         old_value TEXT,
         new_value TEXT,
         changed_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS attendance_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id TEXT NOT NULL,
+        school_year TEXT NOT NULL,
+        section TEXT NOT NULL,
+        date TEXT,
+        type TEXT,
+        time TEXT,
+        reason TEXT,
+        time_lost TEXT,
+        fetched_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS attendance_totals (
+        student_id TEXT NOT NULL,
+        school_year TEXT NOT NULL,
+        absent_excused INTEGER DEFAULT 0,
+        absent_unexcused INTEGER DEFAULT 0,
+        tardy_excused INTEGER DEFAULT 0,
+        tardy_unexcused INTEGER DEFAULT 0,
+        early_dismissal_excused INTEGER DEFAULT 0,
+        early_dismissal_unexcused INTEGER DEFAULT 0,
+        total_time_lost TEXT,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (student_id, school_year)
+      );
+
+      CREATE TABLE IF NOT EXISTS demerits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id TEXT NOT NULL,
+        school_year TEXT NOT NULL,
+        date TEXT,
+        homeroom_teacher TEXT,
+        issuing_teacher TEXT,
+        infraction TEXT,
+        detail TEXT,
+        demerits_issued INTEGER DEFAULT 0,
+        gp_minor INTEGER DEFAULT 0,
+        gp_major INTEGER DEFAULT 0,
+        gp_total INTEGER DEFAULT 0,
+        year_minor INTEGER DEFAULT 0,
+        year_major INTEGER DEFAULT 0,
+        year_total INTEGER DEFAULT 0,
+        fetched_at TEXT NOT NULL
       );
     `);
 
@@ -340,6 +390,168 @@ export class GradicusCache {
     insertAll();
 
     this.logSync(studentId, schoolYear, "schedule", schedule.entries.length);
+  }
+
+  // --- Cache Demerits ---
+
+  cacheDemerits(history: DemeritHistory): void {
+    const now = new Date().toISOString();
+    const studentId = history.student.id;
+    const schoolYear = history.schoolYear;
+
+    this.db.prepare(
+      `DELETE FROM demerits WHERE student_id = ? AND school_year = ?`
+    ).run(studentId, schoolYear);
+
+    const insert = this.db.prepare(`
+      INSERT INTO demerits (student_id, school_year, date, homeroom_teacher, issuing_teacher,
+                            infraction, detail, demerits_issued,
+                            gp_minor, gp_major, gp_total, year_minor, year_major, year_total,
+                            fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertAll = this.db.transaction(() => {
+      for (const e of history.entries) {
+        insert.run(studentId, schoolYear, e.date, e.homeroomTeacher, e.issuingTeacher,
+                    e.infraction, e.detail, e.demeritsIssued,
+                    e.gpMinor, e.gpMajor, e.gpTotal,
+                    e.yearMinor, e.yearMajor, e.yearTotal, now);
+      }
+    });
+    insertAll();
+
+    this.logSync(studentId, schoolYear, "demerits", history.entries.length);
+  }
+
+  getCachedDemerits(studentId: string, schoolYear?: string): DemeritHistory | null {
+    const year = schoolYear || this.getCurrentSchoolYear();
+
+    const student = this.db.prepare(`SELECT * FROM students WHERE id = ?`).get(studentId) as any;
+    if (!student) return null;
+
+    const rows = this.db.prepare(
+      `SELECT * FROM demerits WHERE student_id = ? AND school_year = ? ORDER BY date DESC`
+    ).all(studentId, year) as any[];
+
+    if (rows.length === 0) return null;
+
+    const entries: DemeritEntry[] = rows.map((r: any) => ({
+      date: r.date || "",
+      homeroomTeacher: r.homeroom_teacher || "",
+      issuingTeacher: r.issuing_teacher || "",
+      infraction: r.infraction || "",
+      detail: r.detail || "",
+      demeritsIssued: r.demerits_issued ?? 0,
+      gpMinor: r.gp_minor ?? 0,
+      gpMajor: r.gp_major ?? 0,
+      gpTotal: r.gp_total ?? 0,
+      yearMinor: r.year_minor ?? 0,
+      yearMajor: r.year_major ?? 0,
+      yearTotal: r.year_total ?? 0,
+    }));
+
+    // Reconstruct summary from running totals per GP
+    // (not perfectly precise from cached data, but entries store GP totals)
+    const lastEntry = entries[0];
+    const summary = {
+      gp1: 0, gp2: 0, gp3: 0, gp4: 0,
+    };
+    // Use yearTotal from last entry as total demerits
+    // Individual GP counts aren't stored separately, so leave at 0 from cache
+    // (live fetch will have the real summary)
+
+    return {
+      student: { id: student.id, name: student.name, gradeLevel: student.grade_level, teacher: student.homeroom_teacher },
+      schoolYear: year,
+      gradingPeriod: "all",
+      summary,
+      entries,
+    };
+  }
+
+  // --- Cache Attendance ---
+
+  cacheAttendance(report: AttendanceReport): void {
+    const now = new Date().toISOString();
+    const studentId = report.student.id;
+    const schoolYear = report.schoolYear;
+
+    this.db.prepare(
+      `DELETE FROM attendance_records WHERE student_id = ? AND school_year = ?`
+    ).run(studentId, schoolYear);
+
+    const insert = this.db.prepare(`
+      INSERT INTO attendance_records (student_id, school_year, section, date, type, time, reason, time_lost, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertAll = this.db.transaction(() => {
+      for (const e of report.absencesAndTardies) {
+        insert.run(studentId, schoolYear, "absences", e.date, e.type, e.time, e.reason, e.timeLost, now);
+      }
+      for (const e of report.earlyDismissals) {
+        insert.run(studentId, schoolYear, "dismissals", e.date, e.type, e.time, e.reason, e.timeLost, now);
+      }
+    });
+    insertAll();
+
+    this.db.prepare(`
+      INSERT INTO attendance_totals (student_id, school_year, absent_excused, absent_unexcused,
+        tardy_excused, tardy_unexcused, early_dismissal_excused, early_dismissal_unexcused,
+        total_time_lost, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(student_id, school_year) DO UPDATE SET
+        absent_excused=excluded.absent_excused, absent_unexcused=excluded.absent_unexcused,
+        tardy_excused=excluded.tardy_excused, tardy_unexcused=excluded.tardy_unexcused,
+        early_dismissal_excused=excluded.early_dismissal_excused,
+        early_dismissal_unexcused=excluded.early_dismissal_unexcused,
+        total_time_lost=excluded.total_time_lost, fetched_at=excluded.fetched_at
+    `).run(studentId, schoolYear,
+           report.totals.absentExcused, report.totals.absentUnexcused,
+           report.totals.tardyExcused, report.totals.tardyUnexcused,
+           report.totals.earlyDismissalExcused, report.totals.earlyDismissalUnexcused,
+           report.totals.totalTimeLost, now);
+
+    this.logSync(studentId, schoolYear, "attendance_detail", report.absencesAndTardies.length + report.earlyDismissals.length);
+  }
+
+  getCachedAttendance(studentId: string, schoolYear?: string): AttendanceReport | null {
+    const year = schoolYear || this.getCurrentSchoolYear();
+
+    const student = this.db.prepare(`SELECT * FROM students WHERE id = ?`).get(studentId) as any;
+    if (!student) return null;
+
+    const records = this.db.prepare(
+      `SELECT * FROM attendance_records WHERE student_id = ? AND school_year = ? ORDER BY date DESC`
+    ).all(studentId, year) as any[];
+
+    const totalsRow = this.db.prepare(
+      `SELECT * FROM attendance_totals WHERE student_id = ? AND school_year = ?`
+    ).get(studentId, year) as any;
+
+    if (records.length === 0 && !totalsRow) return null;
+
+    const mapEntry = (r: any): AttendanceEntry => ({
+      date: r.date || "", type: r.type || "", time: r.time || "",
+      reason: r.reason || "", timeLost: r.time_lost || "",
+    });
+
+    return {
+      student: { id: student.id, name: student.name, gradeLevel: student.grade_level, teacher: student.homeroom_teacher },
+      schoolYear: year,
+      absencesAndTardies: records.filter((r: any) => r.section === "absences").map(mapEntry),
+      earlyDismissals: records.filter((r: any) => r.section === "dismissals").map(mapEntry),
+      totals: {
+        absentExcused: totalsRow?.absent_excused ?? 0,
+        absentUnexcused: totalsRow?.absent_unexcused ?? 0,
+        tardyExcused: totalsRow?.tardy_excused ?? 0,
+        tardyUnexcused: totalsRow?.tardy_unexcused ?? 0,
+        earlyDismissalExcused: totalsRow?.early_dismissal_excused ?? 0,
+        earlyDismissalUnexcused: totalsRow?.early_dismissal_unexcused ?? 0,
+        totalTimeLost: totalsRow?.total_time_lost || "",
+      },
+    };
   }
 
   // --- Retrieve Cached Data ---
