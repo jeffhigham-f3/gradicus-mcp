@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { GradicusScraper } from "./scraper.js";
 import { GradicusCache } from "./cache.js";
-import { StudentReport, StudentSchedule, DemeritHistory, AttendanceReport } from "./types.js";
+import { StudentReport, StudentSchedule, DemeritHistory, AttendanceReport, EmailList } from "./types.js";
 
 const server = new McpServer({
   name: "gradicus",
@@ -441,6 +441,74 @@ server.tool(
 );
 
 server.tool(
+  "get_emails",
+  "Get recent email messages from the Gradicus portal for a student. Uses cache when fresh.",
+  {
+    student_name: z.string().optional().describe("Student name."),
+  },
+  async ({ student_name }) => {
+    try {
+      let studentId: string | undefined;
+      if (student_name) {
+        const cached = cache.getCachedStudents();
+        const match = cached.find(s => s.name.toLowerCase().includes(student_name.toLowerCase()));
+        if (match) studentId = match.id;
+      }
+
+      if (studentId && cache.isFresh(studentId, "emails")) {
+        const cached = cache.getCachedEmails(studentId);
+        if (cached) {
+          const meta = cache.getCacheMetadata(studentId, "emails");
+          return { content: [{ type: "text", text: `${cacheLabel(meta)}\n\n${formatEmails(cached)}` }] };
+        }
+      }
+
+      if (scraper.isLoggedIn()) {
+        const emailList = await scraper.getEmails(student_name);
+        if (emailList.student.id !== "unknown") {
+          cache.cacheEmails(emailList);
+        }
+        return { content: [{ type: "text", text: `[LIVE]\n\n${formatEmails(emailList)}` }] };
+      }
+
+      if (studentId) {
+        const cached = cache.getCachedEmails(studentId);
+        if (cached) {
+          const meta = cache.getCacheMetadata(studentId, "emails");
+          return { content: [{ type: "text", text: `[OFFLINE ${cacheAge(meta.fetchedAt)}]\n\n${formatEmails(cached)}` }] };
+        }
+      }
+
+      throw new Error("No email data. Login and sync first.");
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  "debug_email_page",
+  "Return the raw HTML of the email-view page for debugging the email parser.",
+  {
+    student_name: z.string().optional().describe("Student name."),
+  },
+  async ({ student_name }) => {
+    try {
+      const html = await scraper.getEmailPageHtml(student_name);
+      return { content: [{ type: "text", text: html }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
   "debug_page",
   "Return the raw HTML of the current student report page for debugging selectors.",
   {},
@@ -725,6 +793,33 @@ function formatDemerits(history: DemeritHistory): string {
     if (e.detail) line += ` — ${e.detail}`;
     line += `\n    Issued by: ${e.issuingTeacher} | Demerits: ${e.demeritsIssued} | GP Total: ${e.gpTotal} | Year Total: ${e.yearTotal}`;
     lines.push(line);
+  }
+
+  return lines.join("\n");
+}
+
+function formatEmails(emailList: EmailList): string {
+  const lines: string[] = [];
+  const s = emailList.student;
+
+  lines.push(`Emails for ${s.name}`);
+  lines.push(DIVIDER);
+
+  if (emailList.emails.length === 0) {
+    lines.push("No email messages found.");
+    return lines.join("\n");
+  }
+
+  lines.push(`${emailList.emails.length} message(s)\n`);
+
+  for (const e of emailList.emails) {
+    lines.push(`  [${e.date}]${e.from ? ` From: ${e.from}` : ""}`);
+    if (e.subject) lines.push(`    Subject: ${e.subject}`);
+    if (e.body) {
+      const preview = e.body.length > 300 ? e.body.substring(0, 300) + "..." : e.body;
+      lines.push(`    ${preview}`);
+    }
+    lines.push("");
   }
 
   return lines.join("\n");

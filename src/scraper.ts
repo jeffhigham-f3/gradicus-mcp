@@ -15,6 +15,8 @@ import {
   AttendanceEntry,
   AttendanceTotals,
   AttendanceReport,
+  EmailMessage,
+  EmailList,
 } from "./types.js";
 
 const BASE_URL = "https://gradicus.schoolclassics.org";
@@ -448,6 +450,155 @@ export class GradicusScraper {
     const month = now.getMonth() + 1;
     if (month >= 8) return `${year}-${year + 1}`;
     return `${year - 1}-${year}`;
+  }
+
+  async getEmails(studentName?: string): Promise<EmailList> {
+    this.ensureLoggedIn();
+    const page = this.page!;
+
+    let studentId = "";
+    if (studentName) {
+      await this.navigateToReport();
+      const students = await this.listStudents();
+      const match = students.find((s) =>
+        s.name.toLowerCase().includes(studentName.toLowerCase())
+      );
+      if (!match) {
+        throw new Error(`Student "${studentName}" not found.`);
+      }
+      studentId = match.id;
+    }
+
+    const params = new URLSearchParams();
+    if (studentId) params.set("studentid", studentId);
+    const qs = params.toString();
+
+    await page.goto(`${BASE_URL}/email-view.php${qs ? "?" + qs : ""}`, {
+      waitUntil: "networkidle",
+    });
+
+    const html = await page.content();
+    return this.parseEmails(html);
+  }
+
+  async getEmailPageHtml(studentName?: string): Promise<string> {
+    this.ensureLoggedIn();
+    const page = this.page!;
+
+    let studentId = "";
+    if (studentName) {
+      await this.navigateToReport();
+      const students = await this.listStudents();
+      const match = students.find((s) =>
+        s.name.toLowerCase().includes(studentName.toLowerCase())
+      );
+      if (match) studentId = match.id;
+    }
+
+    const params = new URLSearchParams();
+    if (studentId) params.set("studentid", studentId);
+    const qs = params.toString();
+
+    await page.goto(`${BASE_URL}/email-view.php${qs ? "?" + qs : ""}`, {
+      waitUntil: "networkidle",
+    });
+
+    return await page.content();
+  }
+
+  private parseEmails(html: string): EmailList {
+    const student: Student = { id: "unknown", name: "Unknown" };
+
+    const selMatch = html.match(
+      /<option\s+value="([^"]+)"\s+selected="selected">([^<]+)<\/option>/
+    );
+    if (selMatch) {
+      student.id = selMatch[1];
+      student.name = selMatch[2].trim();
+    }
+
+    const emails: EmailMessage[] = [];
+
+    // Strategy 1: Look for table rows with email data
+    // Common patterns: date, from/sender, subject columns in a table
+    const tableRegex = /<table[^>]*>([\s\S]*?)<\/table>/g;
+    let tableMatch;
+    while ((tableMatch = tableRegex.exec(html)) !== null) {
+      const tableHtml = tableMatch[1];
+      if (tableHtml.includes("tableheader") || tableHtml.includes("Subject") ||
+          tableHtml.includes("subject") || tableHtml.includes("From") ||
+          tableHtml.includes("Date")) {
+        const rowRegex = /(<tr>|<tr\s+[^>]*>)\s*([\s\S]*?)\s*<\/tr>/g;
+        let rowMatch;
+        let rowIdx = 0;
+        while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
+          const rowHtml = rowMatch[2];
+          if (rowHtml.includes("tableheader") || rowHtml.includes("<th")) {
+            continue;
+          }
+
+          const cells = this.extractCells(rowHtml);
+          if (cells.length >= 3) {
+            const dateStr = cells.find(c => /\w{3}\s+\d{1,2},?\s+\d{4}/.test(c)) || cells[0];
+            const email: EmailMessage = {
+              id: `email-${rowIdx}`,
+              date: dateStr.trim(),
+              from: cells.length >= 4 ? cells[1].trim() : "",
+              subject: cells.length >= 4 ? cells[2].trim() : cells[1].trim(),
+              body: cells[cells.length - 1].trim(),
+              studentName: student.name,
+            };
+            if (email.date || email.subject) {
+              emails.push(email);
+              rowIdx++;
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy 2: Look for div-based email layout (cards/blocks)
+    if (emails.length === 0) {
+      const blockRegex = /<div[^>]*class="[^"]*(?:email|message|mail)[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div[^>]*class="[^"]*(?:email|message|mail)|$)/gi;
+      let blockMatch;
+      let blockIdx = 0;
+      while ((blockMatch = blockRegex.exec(html)) !== null) {
+        const block = blockMatch[1];
+        const dateMatch = block.match(/(\w{3}\s+\d{1,2},?\s+\d{4})/);
+        const fromMatch = block.match(/(?:From|Sent by|Teacher)[:\s]*([^<\n]+)/i);
+        const subjectMatch = block.match(/(?:Subject|Re)[:\s]*([^<\n]+)/i);
+        const bodyText = this.stripHtml(block).trim();
+
+        emails.push({
+          id: `email-${blockIdx}`,
+          date: dateMatch ? dateMatch[1].trim() : "",
+          from: fromMatch ? fromMatch[1].trim() : "",
+          subject: subjectMatch ? subjectMatch[1].trim() : "",
+          body: bodyText.substring(0, 2000),
+          studentName: student.name,
+        });
+        blockIdx++;
+      }
+    }
+
+    // Strategy 3: Parse the full page text as a single content block if no structured emails found
+    if (emails.length === 0) {
+      const bodyText = this.stripHtml(html);
+      if (bodyText.includes("permission") || bodyText.includes("no emails") || bodyText.includes("No messages")) {
+        // No emails or no permission
+      } else if (bodyText.length > 100) {
+        emails.push({
+          id: "raw-content",
+          date: new Date().toISOString().split("T")[0],
+          from: "",
+          subject: "(Unparsed email page content)",
+          body: bodyText.substring(0, 5000),
+          studentName: student.name,
+        });
+      }
+    }
+
+    return { student, emails };
   }
 
   async getPageContent(): Promise<string> {

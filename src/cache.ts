@@ -11,6 +11,8 @@ import {
   DemeritEntry,
   AttendanceReport,
   AttendanceEntry,
+  EmailMessage,
+  EmailList,
   CacheMetadata,
   SyncStatusEntry,
   SyncStatus,
@@ -187,6 +189,17 @@ export class GradicusCache {
         total_time_lost TEXT,
         fetched_at TEXT NOT NULL,
         PRIMARY KEY (student_id, school_year)
+      );
+
+      CREATE TABLE IF NOT EXISTS emails (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id TEXT NOT NULL,
+        email_id TEXT NOT NULL,
+        date TEXT,
+        sender TEXT,
+        subject TEXT,
+        body TEXT,
+        fetched_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS demerits (
@@ -551,6 +564,56 @@ export class GradicusCache {
         earlyDismissalUnexcused: totalsRow?.early_dismissal_unexcused ?? 0,
         totalTimeLost: totalsRow?.total_time_lost || "",
       },
+    };
+  }
+
+  // --- Cache Emails ---
+
+  cacheEmails(emailList: EmailList): void {
+    const now = new Date().toISOString();
+    const studentId = emailList.student.id;
+
+    this.db.prepare(
+      `DELETE FROM emails WHERE student_id = ?`
+    ).run(studentId);
+
+    const insert = this.db.prepare(`
+      INSERT INTO emails (student_id, email_id, date, sender, subject, body, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertAll = this.db.transaction(() => {
+      for (const e of emailList.emails) {
+        insert.run(studentId, e.id, e.date, e.from, e.subject, e.body, now);
+      }
+    });
+    insertAll();
+
+    this.logSync(studentId, this.getCurrentSchoolYear(), "emails", emailList.emails.length);
+  }
+
+  getCachedEmails(studentId: string): EmailList | null {
+    const student = this.db.prepare(`SELECT * FROM students WHERE id = ?`).get(studentId) as any;
+    if (!student) return null;
+
+    const rows = this.db.prepare(
+      `SELECT * FROM emails WHERE student_id = ? ORDER BY date DESC`
+    ).all(studentId) as any[];
+
+    if (rows.length === 0) return null;
+
+    const emails: EmailMessage[] = rows.map((r: any) => ({
+      id: r.email_id || "",
+      date: r.date || "",
+      from: r.sender || "",
+      subject: r.subject || "",
+      body: r.body || "",
+      studentName: student.name,
+    }));
+
+    return {
+      student: { id: student.id, name: student.name, gradeLevel: student.grade_level, teacher: student.homeroom_teacher },
+      emails,
     };
   }
 

@@ -141,6 +141,20 @@ export interface StudentReport {
   reportDate: string;
 }
 
+export interface EmailMessage {
+  id: string;
+  date: string;
+  from: string;
+  subject: string;
+  body: string;
+  studentName: string;
+}
+
+export interface EmailList {
+  student: Student;
+  emails: EmailMessage[];
+}
+
 // --- Caching types ---
 
 export interface CacheMetadata {
