@@ -1,9 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { spawn } from "child_process";
+import { createHash } from "crypto";
+import { readFileSync, readdirSync, statSync } from "fs";
+import { dirname, join, relative } from "path";
+import { fileURLToPath } from "url";
 import { GradicusScraper } from "./scraper.js";
 import { GradicusCache } from "./cache.js";
 import { StudentReport, StudentSchedule, DemeritHistory, AttendanceReport, EmailList } from "./types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = join(__dirname, "..");
+const DEFAULT_NETLIFY_SITE_ID = "13e4d96b-833c-4950-9e0c-f2dbca58a807";
 
 const server = new McpServer({
   name: "gradicus",
@@ -534,6 +543,211 @@ server.tool(
     return { content: [{ type: "text", text: `${result}\nCached data is still available for offline queries.` }] };
   }
 );
+
+server.tool(
+  "daily_report",
+  "Generate a visual daily report (HTML, charts, today's priorities) for all students and optionally deploy it to Netlify. Returns the live URL when deployed, or the local file path otherwise. Pass `insights` (a map of student name → one-paragraph LLM-generated insight) to have a per-student summary card rendered prominently at the top of each panel; the calling LLM is expected to author each paragraph fresh based on the latest data.",
+  {
+    sync: z.boolean().optional().describe("Refresh data from Gradicus before building the report. Default: true if logged in, false otherwise."),
+    deploy: z.boolean().optional().describe("Deploy the built report to Netlify. Default: true when NETLIFY_AUTH_TOKEN is set, otherwise false."),
+    site_id: z.string().optional().describe("Override the Netlify site ID. Defaults to NETLIFY_SITE_ID env or the gradicus-mcp site."),
+    insights: z.record(z.string(), z.string()).optional().describe("Map of student name (or partial first/last name match) to a one-paragraph insight written by the calling LLM. Each insight should cover what the student is doing well, the most important area to improve, and one or two concrete actions parents can take at home this week. Plain prose only — no markdown."),
+    family_insight: z.string().optional().describe("One- or two-paragraph household-level insight written by the calling LLM, considering family dynamics, student ages, cross-grade patterns, and concrete ways stronger students can support weaker ones in their areas of strength. Renders prominently in the Summary tab above the per-student cards. Plain prose only — no markdown."),
+  },
+  async ({ sync, deploy, site_id, insights, family_insight }) => {
+    const lines: string[] = [];
+    const distDir = join(PROJECT_ROOT, "report", "dist");
+    const indexPath = join(distDir, "index.html");
+
+    const shouldSync = sync !== undefined ? sync : scraper.isLoggedIn();
+    if (shouldSync) {
+      if (!scraper.isLoggedIn()) {
+        return {
+          content: [{ type: "text", text: "Cannot sync: not logged in. Call login first, or pass sync=false to use cached data." }],
+          isError: true,
+        };
+      }
+      lines.push("Syncing fresh data from Gradicus...");
+      try {
+        const students = await scraper.listStudents();
+        for (const s of students) {
+          try {
+            await syncStudent(s.name);
+            lines.push(`  Synced ${s.name}`);
+          } catch (err) {
+            lines.push(`  Failed to sync ${s.name}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        lines.push(`Sync complete. ${students.length} student(s).`);
+      } catch (err) {
+        lines.push(`Sync error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      lines.push("Skipping sync (using cached data).");
+    }
+
+    lines.push("\nGenerating report...");
+    if (insights && Object.keys(insights).length > 0) {
+      lines.push(`  Including AI insights for: ${Object.keys(insights).join(", ")}`);
+    }
+    if (family_insight && family_insight.trim()) {
+      lines.push(`  Including family-level insight (${family_insight.length} chars)`);
+    }
+    try {
+      await runReportGenerator(insights, family_insight);
+    } catch (err) {
+      lines.push(`Generator failed: ${err instanceof Error ? err.message : String(err)}`);
+      return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
+    }
+
+    let sizeKb = 0;
+    try {
+      sizeKb = Math.round(statSync(indexPath).size / 1024);
+      lines.push(`Built ${indexPath} (${sizeKb} KB)`);
+    } catch {
+      lines.push(`Generator did not produce ${indexPath}`);
+      return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
+    }
+
+    const token = process.env.NETLIFY_AUTH_TOKEN;
+    const siteId = site_id || process.env.NETLIFY_SITE_ID || DEFAULT_NETLIFY_SITE_ID;
+    const shouldDeploy = deploy !== undefined ? deploy : !!token;
+
+    if (!shouldDeploy) {
+      lines.push(`\nDeploy skipped. Open the report locally:\n  file://${indexPath}`);
+    } else if (!token) {
+      lines.push(
+        `\nDeploy requested but NETLIFY_AUTH_TOKEN is not set. Add it to the gradicus MCP env in ~/.cursor/mcp.json (or shell env) to enable auto-deploy.\n` +
+        `Local report: file://${indexPath}`
+      );
+    } else {
+      lines.push(`\nDeploying to Netlify (site ${siteId})...`);
+      try {
+        const result = await deployToNetlify(distDir, siteId, token);
+        lines.push(`Live: ${result.url}`);
+        lines.push(`Deploy ID: ${result.id}`);
+      } catch (err) {
+        lines.push(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
+        lines.push(`Local report still available: file://${indexPath}`);
+        return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
+      }
+    }
+
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+// --- Report generator + deploy helpers ---
+
+function runReportGenerator(
+  insights?: Record<string, string>,
+  familyInsight?: string
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env };
+    if (insights && Object.keys(insights).length > 0) {
+      env.GRADICUS_AI_INSIGHTS = JSON.stringify(insights);
+    }
+    if (familyInsight && familyInsight.trim()) {
+      env.GRADICUS_FAMILY_INSIGHT = familyInsight.trim();
+    }
+    const proc = spawn(process.execPath, ["report/generate.mjs"], {
+      cwd: PROJECT_ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    let stderr = "";
+    proc.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    proc.stdout.on("data", () => { /* ignore stdout */ });
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`generate.mjs exited with code ${code}. ${stderr.trim()}`));
+    });
+  });
+}
+
+interface DeployFile {
+  path: string;
+  content: Buffer;
+  sha1: string;
+}
+
+function walkDistFiles(distDir: string): DeployFile[] {
+  const out: DeployFile[] = [];
+  function walk(dir: string) {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      const st = statSync(full);
+      if (st.isDirectory()) walk(full);
+      else if (st.isFile()) {
+        const content = readFileSync(full);
+        const path = "/" + relative(distDir, full).replace(/\\/g, "/");
+        out.push({ path, content, sha1: createHash("sha1").update(content).digest("hex") });
+      }
+    }
+  }
+  walk(distDir);
+  return out;
+}
+
+interface NetlifyDeployResponse {
+  id: string;
+  required: string[];
+  deploy_url?: string;
+  deploy_ssl_url?: string;
+  ssl_url?: string;
+  url?: string;
+}
+
+async function deployToNetlify(
+  distDir: string,
+  siteId: string,
+  token: string
+): Promise<{ url: string; id: string }> {
+  const files = walkDistFiles(distDir);
+  if (files.length === 0) throw new Error(`No files found in ${distDir}`);
+
+  const fileMap: Record<string, string> = {};
+  for (const f of files) fileMap[f.path] = f.sha1;
+
+  const createResp = await fetch(`https://api.netlify.com/api/v1/sites/${siteId}/deploys`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ files: fileMap, async: false }),
+  });
+
+  if (!createResp.ok) {
+    throw new Error(`Netlify create-deploy failed: ${createResp.status} ${await createResp.text()}`);
+  }
+
+  const deploy = (await createResp.json()) as NetlifyDeployResponse;
+  const required = new Set(deploy.required || []);
+
+  for (const f of files) {
+    if (!required.has(f.sha1)) continue;
+    const upResp = await fetch(
+      `https://api.netlify.com/api/v1/deploys/${deploy.id}/files${f.path}`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/octet-stream",
+        },
+        body: new Uint8Array(f.content),
+      }
+    );
+    if (!upResp.ok) {
+      throw new Error(`Upload of ${f.path} failed: ${upResp.status} ${await upResp.text()}`);
+    }
+  }
+
+  const url = deploy.deploy_ssl_url || deploy.ssl_url || deploy.deploy_url || deploy.url || "";
+  return { url, id: deploy.id };
+}
 
 // --- Formatting helpers ---
 

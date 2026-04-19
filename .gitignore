@@ -4,6 +4,7 @@ node_modules/
 # Build output
 dist/
 build/
+report/dist/
 
 # SQLite cache database
 data/

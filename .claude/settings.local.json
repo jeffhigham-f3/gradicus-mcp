@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__gradicus__list_students",
+      "mcp__gradicus__get_grade_summary",
+      "mcp__gradicus__get_attendance",
+      "mcp__gradicus__get_demerit_history",
+      "mcp__gradicus__get_homework",
+      "mcp__gradicus__get_emails",
+      "Bash(netlify --version)",
+      "Bash(netlify sites:list)",
+      "mcp__claude_ai_Netlify__netlify-user-services-reader",
+      "mcp__claude_ai_Netlify__netlify-team-services-reader",
+      "mcp__claude_ai_Netlify__netlify-project-services-reader",
+      "Bash(node *)",
+      "mcp__claude_ai_Netlify__netlify-deploy-services-updater",
+      "Bash(npx *)",
+      "mcp__gradicus__login"
+    ]
+  }
+}

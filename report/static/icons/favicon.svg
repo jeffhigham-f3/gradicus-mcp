@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Gradicus">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <!-- Mortarboard (top diamond) -->
+  <path d="M32 16 L54 26 L32 36 L10 26 Z" fill="#fff"/>
+  <!-- Cap base (trapezoid) -->
+  <path d="M18 30 L18 40 C18 43 24 46 32 46 C40 46 46 43 46 40 L46 30 L32 36 Z" fill="#fff"/>
+  <!-- Tassel -->
+  <path d="M50 26 L50 40 M48 40 L52 40 M48 40 L48 44 L52 44 L52 40" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="50" cy="26" r="1.4" fill="#fff"/>
+</svg>
