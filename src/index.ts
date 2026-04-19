@@ -15,6 +15,9 @@ const PROJECT_ROOT = join(__dirname, "..");
 const DEFAULT_NETLIFY_SITE_ID = "13e4d96b-833c-4950-9e0c-f2dbca58a807";
 const DEFAULT_DEPLOY_REMOTE = "git@github.com:jeffhigham-f3/gradicus-deploy.git";
 const DEPLOY_DIR = join(PROJECT_ROOT, ".deploy");
+/** Author for deploy-repo commits (Vercel/GitHub require a verified email). */
+const DEPLOY_GIT_AUTHOR_NAME = "Jeff Higham";
+const DEPLOY_GIT_AUTHOR_EMAIL = "jeff@jeffhigham.com";
 
 const server = new McpServer({
   name: "gradicus",
@@ -843,13 +846,23 @@ async function deployToGit(distDir: string, remote: string): Promise<GitDeployRe
   writeFileSync(join(DEPLOY_DIR, "vercel.json"), VERCEL_CONFIG, "utf-8");
   writeFileSync(join(DEPLOY_DIR, "README.md"), DEPLOY_README, "utf-8");
 
-  // 6. Commit + push using the caller's global git identity (must be a verified
-  // email on the GitHub account that owns the deploy repo, otherwise Vercel
-  // will reject the deploy with "commit author email is not valid").
+  // 6. Commit + push with fixed author (verified email on the deploy repo owner).
   await runGit(["add", "."], DEPLOY_DIR);
   const ts = new Date().toISOString();
   try {
-    await runGit(["commit", "-m", `deploy: ${ts}`, "--allow-empty"], DEPLOY_DIR);
+    await runGit(
+      [
+        "-c",
+        `user.name=${DEPLOY_GIT_AUTHOR_NAME}`,
+        "-c",
+        `user.email=${DEPLOY_GIT_AUTHOR_EMAIL}`,
+        "commit",
+        "-m",
+        `deploy: ${ts}`,
+        "--allow-empty",
+      ],
+      DEPLOY_DIR
+    );
   } catch (err) {
     // commit can fail if there's truly nothing to commit and --allow-empty path was rejected by hooks; surface clearly
     throw new Error(`commit failed: ${err instanceof Error ? err.message : String(err)}`);
