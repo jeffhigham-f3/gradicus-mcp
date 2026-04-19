@@ -315,9 +315,13 @@ export class GradicusCache {
 
     upsertGrades(report.grades);
 
-    // Replace assignments (non-frozen only)
+    // Replace assignments. Previously this only deleted is_frozen=0 rows, but
+    // freezeCompletedPeriods() runs after every sync and marks GP1-GP3 rows
+    // is_frozen=1, so subsequent syncs would skip them in DELETE and append
+    // duplicates. Since every cacheReport call is a fresh authoritative scrape
+    // of the current source of truth, we always replace the full set.
     this.db.prepare(
-      `DELETE FROM assignments WHERE student_id = ? AND school_year = ? AND is_frozen = 0`
+      `DELETE FROM assignments WHERE student_id = ? AND school_year = ?`
     ).run(studentId, schoolYear);
 
     const insertAssignment = this.db.prepare(`

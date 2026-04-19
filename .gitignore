@@ -6,6 +6,10 @@ dist/
 build/
 report/dist/
 
+# Local clone of the deploy repo (gradicus-deploy on GitHub) used by the
+# daily_report MCP tool to push report/dist/ to Vercel via git.
+.deploy/
+
 # SQLite cache database
 data/
 *.tsbuildinfo

@@ -905,7 +905,7 @@ a{color:var(--accent-l)}
 .drawer.open{transform:translateX(0)}
 .drawer-hdr{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.5rem .75rem .75rem 1rem;border-bottom:1px solid var(--border);margin-bottom:.5rem}
 .drawer-brand{font-size:.78rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase;background:linear-gradient(135deg,var(--accent-l),var(--title-grad-end));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.drawer-list{list-style:none;padding:.25rem .5rem;margin:0;overflow-y:auto;-webkit-overflow-scrolling:touch;flex:1}
+.drawer-list{list-style:none;padding:.25rem .5rem;margin:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
 .drawer-section-label{font-size:.65rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;padding:.75rem .75rem .25rem}
 .drawer-item{position:relative;overflow:hidden;display:flex;align-items:center;gap:.75rem;width:100%;min-height:var(--touch-comfy);padding:.5rem .75rem;border:none;background:transparent;color:var(--text);font:inherit;font-size:.95rem;text-align:left;cursor:pointer;border-radius:var(--shape-full);transition:background var(--motion-fast);-webkit-tap-highlight-color:transparent}
 .drawer-item:hover{background:color-mix(in oklab,var(--text) 6%,transparent)}
@@ -921,7 +921,7 @@ a{color:var(--accent-l)}
 .drawer-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .drawer-grade{font-size:.72rem;color:var(--muted);font-weight:500;flex-shrink:0;letter-spacing:.02em}
 .drawer-divider{height:1px;background:var(--border);margin:.4rem .75rem}
-.drawer-foot{padding:.5rem .75rem .75rem;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:.5rem}
+.drawer-foot{margin-top:auto;padding:.5rem .75rem .75rem;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:.5rem}
 .drawer-foot-meta{font-size:.7rem;color:var(--muted);text-align:center}
 .drawer-install{position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;gap:.5rem;width:100%;min-height:var(--touch-min);padding:.55rem 1rem;background:var(--accent);color:var(--on-accent);border:none;border-radius:var(--shape-full);font:inherit;font-weight:600;font-size:.9rem;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background var(--motion-fast),box-shadow var(--motion-fast),transform var(--motion-fast);box-shadow:var(--elev-1)}
 .drawer-install:hover{background:var(--accent-l);box-shadow:var(--elev-2)}

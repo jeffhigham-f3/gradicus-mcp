@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
-import { readFileSync, readdirSync, statSync } from "fs";
+import { readFileSync, readdirSync, statSync, existsSync, rmSync, writeFileSync, mkdirSync, copyFileSync } from "fs";
 import { dirname, join, relative } from "path";
 import { fileURLToPath } from "url";
 import { GradicusScraper } from "./scraper.js";
@@ -13,6 +13,8 @@ import { StudentReport, StudentSchedule, DemeritHistory, AttendanceReport, Email
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..");
 const DEFAULT_NETLIFY_SITE_ID = "13e4d96b-833c-4950-9e0c-f2dbca58a807";
+const DEFAULT_DEPLOY_REMOTE = "git@github.com:jeffhigham-f3/gradicus-deploy.git";
+const DEPLOY_DIR = join(PROJECT_ROOT, ".deploy");
 
 const server = new McpServer({
   name: "gradicus",
@@ -546,15 +548,17 @@ server.tool(
 
 server.tool(
   "daily_report",
-  "Generate a visual daily report (HTML, charts, today's priorities) for all students and optionally deploy it to Netlify. Returns the live URL when deployed, or the local file path otherwise. Pass `insights` (a map of student name → one-paragraph LLM-generated insight) to have a per-student summary card rendered prominently at the top of each panel; the calling LLM is expected to author each paragraph fresh based on the latest data.",
+  "Generate a visual daily report (HTML, charts, today's priorities) for all students and optionally deploy it. Default deploy target is Git (pushes report/dist to a deploy repo that Vercel watches). Pass `insights` (a map of student name → one-paragraph LLM-generated insight) to have a per-student summary card rendered prominently at the top of each panel; the calling LLM is expected to author each paragraph fresh based on the latest data.",
   {
     sync: z.boolean().optional().describe("Refresh data from Gradicus before building the report. Default: true if logged in, false otherwise."),
-    deploy: z.boolean().optional().describe("Deploy the built report to Netlify. Default: true when NETLIFY_AUTH_TOKEN is set, otherwise false."),
-    site_id: z.string().optional().describe("Override the Netlify site ID. Defaults to NETLIFY_SITE_ID env or the gradicus-mcp site."),
+    deploy: z.boolean().optional().describe("Deploy the built report. Default: true when a deploy target is configured (NETLIFY_AUTH_TOKEN for netlify, or git remote configured)."),
+    deploy_to: z.enum(["git", "netlify", "both", "none"]).optional().describe("Where to deploy: 'git' pushes report/dist to the deploy repo (Vercel auto-deploys); 'netlify' uses the Netlify file-digest API; 'both' does both; 'none' skips deploy. Default: 'git'."),
+    git_remote: z.string().optional().describe("SSH/HTTPS URL of the deploy repo. Defaults to git@github.com:jeffhigham-f3/gradicus-deploy.git."),
+    site_id: z.string().optional().describe("Override the Netlify site ID (only used when deploy_to includes 'netlify')."),
     insights: z.record(z.string(), z.string()).optional().describe("Map of student name (or partial first/last name match) to a one-paragraph insight written by the calling LLM. Each insight should cover what the student is doing well, the most important area to improve, and one or two concrete actions parents can take at home this week. Plain prose only — no markdown."),
     family_insight: z.string().optional().describe("One- or two-paragraph household-level insight written by the calling LLM, considering family dynamics, student ages, cross-grade patterns, and concrete ways stronger students can support weaker ones in their areas of strength. Renders prominently in the Summary tab above the per-student cards. Plain prose only — no markdown."),
   },
-  async ({ sync, deploy, site_id, insights, family_insight }) => {
+  async ({ sync, deploy, deploy_to, git_remote, site_id, insights, family_insight }) => {
     const lines: string[] = [];
     const distDir = join(PROJECT_ROOT, "report", "dist");
     const indexPath = join(distDir, "index.html");
@@ -609,30 +613,54 @@ server.tool(
       return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
     }
 
+    const target = deploy_to || "git";
     const token = process.env.NETLIFY_AUTH_TOKEN;
     const siteId = site_id || process.env.NETLIFY_SITE_ID || DEFAULT_NETLIFY_SITE_ID;
-    const shouldDeploy = deploy !== undefined ? deploy : !!token;
+    const remote = git_remote || process.env.GRADICUS_DEPLOY_REMOTE || DEFAULT_DEPLOY_REMOTE;
+    const shouldDeploy = deploy !== undefined ? deploy : (target !== "none");
 
-    if (!shouldDeploy) {
+    if (!shouldDeploy || target === "none") {
       lines.push(`\nDeploy skipped. Open the report locally:\n  file://${indexPath}`);
-    } else if (!token) {
-      lines.push(
-        `\nDeploy requested but NETLIFY_AUTH_TOKEN is not set. Add it to the gradicus MCP env in ~/.cursor/mcp.json (or shell env) to enable auto-deploy.\n` +
-        `Local report: file://${indexPath}`
-      );
-    } else {
-      lines.push(`\nDeploying to Netlify (site ${siteId})...`);
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+
+    let anyError = false;
+
+    if (target === "git" || target === "both") {
+      lines.push(`\nDeploying to Git (${remote})...`);
       try {
-        const result = await deployToNetlify(distDir, siteId, token);
-        lines.push(`Live: ${result.url}`);
-        lines.push(`Deploy ID: ${result.id}`);
+        const result = await deployToGit(distDir, remote);
+        lines.push(`  Pushed commit ${result.sha.slice(0, 8)} to ${result.branch}`);
+        lines.push(`  Vercel will auto-deploy from this push (typically 5-15s).`);
       } catch (err) {
-        lines.push(`Deploy failed: ${err instanceof Error ? err.message : String(err)}`);
-        lines.push(`Local report still available: file://${indexPath}`);
-        return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
+        anyError = true;
+        lines.push(`Git deploy failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
+    if (target === "netlify" || target === "both") {
+      if (!token) {
+        lines.push(
+          `\nNetlify deploy requested but NETLIFY_AUTH_TOKEN is not set. Add it to the gradicus MCP env in ~/.cursor/mcp.json (or shell env).`
+        );
+        if (target === "netlify") anyError = true;
+      } else {
+        lines.push(`\nDeploying to Netlify (site ${siteId})...`);
+        try {
+          const result = await deployToNetlify(distDir, siteId, token);
+          lines.push(`  Live: ${result.url}`);
+          lines.push(`  Deploy ID: ${result.id}`);
+        } catch (err) {
+          anyError = true;
+          lines.push(`Netlify deploy failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+
+    if (anyError) {
+      lines.push(`\nLocal report still available: file://${indexPath}`);
+      return { content: [{ type: "text", text: lines.join("\n") }], isError: true };
+    }
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
@@ -671,6 +699,165 @@ interface DeployFile {
   path: string;
   content: Buffer;
   sha1: string;
+}
+
+// --- Git deploy ---
+//
+// Maintains a local clone of the deploy repo at .deploy/. On each deploy:
+//   1. Clone if .deploy/ is missing, otherwise fetch + reset --hard origin/HEAD
+//   2. Wipe the working tree (preserving .git/)
+//   3. Mirror report/dist/* into .deploy/
+//   4. Write/refresh vercel.json (so Vercel sets the right MIME + caching for
+//      the manifest, sw.js, and icons — equivalent to the Netlify _headers file)
+//   5. git add . && git commit (--allow-empty so empty diffs still push) && git push
+//
+// Vercel watches the deploy repo and auto-deploys.
+
+const VERCEL_CONFIG = JSON.stringify({
+  $schema: "https://openapi.vercel.sh/vercel.json",
+  cleanUrls: true,
+  headers: [
+    {
+      source: "/manifest.webmanifest",
+      headers: [
+        { key: "Content-Type", value: "application/manifest+json" },
+        { key: "Cache-Control", value: "public, max-age=3600" },
+      ],
+    },
+    {
+      source: "/sw.js",
+      headers: [
+        { key: "Content-Type", value: "application/javascript; charset=utf-8" },
+        { key: "Cache-Control", value: "public, max-age=0, must-revalidate" },
+        { key: "Service-Worker-Allowed", value: "/" },
+      ],
+    },
+    {
+      source: "/icons/(.*)",
+      headers: [
+        { key: "Cache-Control", value: "public, max-age=2592000, immutable" },
+      ],
+    },
+  ],
+}, null, 2) + "\n";
+
+const DEPLOY_README = `# gradicus-deploy
+
+Auto-generated deploy artifact for the Gradicus daily report.
+
+This repository is **published by the gradicus MCP server** on every \`daily_report\`
+call (with \`deploy_to: "git"\` or \`deploy_to: "both"\`). Each commit replaces the
+working-tree contents with the latest \`report/dist/\` output.
+
+Vercel watches this repo and auto-deploys the static site.
+
+Do not edit by hand — changes will be overwritten on the next deploy.
+`;
+
+interface GitDeployResult {
+  sha: string;
+  branch: string;
+  remote: string;
+}
+
+function runGit(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: process.env });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`git ${args.join(" ")} (cwd ${cwd}) failed: ${stderr.trim() || stdout.trim() || `exit ${code}`}`));
+    });
+  });
+}
+
+function clearDeployTree(): void {
+  if (!existsSync(DEPLOY_DIR)) return;
+  for (const entry of readdirSync(DEPLOY_DIR)) {
+    if (entry === ".git") continue;
+    rmSync(join(DEPLOY_DIR, entry), { recursive: true, force: true });
+  }
+}
+
+function copyDirRecursive(srcDir: string, destDir: string): void {
+  mkdirSync(destDir, { recursive: true });
+  for (const name of readdirSync(srcDir)) {
+    const src = join(srcDir, name);
+    const dest = join(destDir, name);
+    const st = statSync(src);
+    if (st.isDirectory()) copyDirRecursive(src, dest);
+    else if (st.isFile()) copyFileSync(src, dest);
+  }
+}
+
+async function deployToGit(distDir: string, remote: string): Promise<GitDeployResult> {
+  // 1. Ensure local clone exists
+  const hasGit = existsSync(join(DEPLOY_DIR, ".git"));
+  if (!hasGit) {
+    if (existsSync(DEPLOY_DIR)) rmSync(DEPLOY_DIR, { recursive: true, force: true });
+    await runGit(["clone", "--depth", "1", remote, DEPLOY_DIR], PROJECT_ROOT);
+  } else {
+    // Make sure remote is what we expect (in case the user changed git_remote)
+    try {
+      const current = await runGit(["remote", "get-url", "origin"], DEPLOY_DIR);
+      if (current.trim() !== remote.trim()) {
+        await runGit(["remote", "set-url", "origin", remote], DEPLOY_DIR);
+      }
+    } catch {
+      await runGit(["remote", "add", "origin", remote], DEPLOY_DIR);
+    }
+    // Pull latest so our push isn't rejected non-fast-forward
+    try {
+      await runGit(["fetch", "origin"], DEPLOY_DIR);
+      // Reset to origin's default branch (handle empty repo gracefully)
+      try {
+        await runGit(["reset", "--hard", "origin/HEAD"], DEPLOY_DIR);
+      } catch {
+        // Fresh repo with no commits yet — that's fine, we'll create the first
+      }
+    } catch {
+      // Network/auth issue on fetch — try to push anyway; commit will succeed locally
+    }
+  }
+
+  // 2. Make sure we're on the main branch (create if missing)
+  let branch = "main";
+  try {
+    branch = (await runGit(["symbolic-ref", "--short", "HEAD"], DEPLOY_DIR)).trim() || "main";
+  } catch {
+    await runGit(["checkout", "-B", "main"], DEPLOY_DIR);
+    branch = "main";
+  }
+
+  // 3. Wipe working tree
+  clearDeployTree();
+
+  // 4. Mirror report/dist into .deploy/
+  copyDirRecursive(distDir, DEPLOY_DIR);
+
+  // 5. Write vercel.json + README
+  writeFileSync(join(DEPLOY_DIR, "vercel.json"), VERCEL_CONFIG, "utf-8");
+  writeFileSync(join(DEPLOY_DIR, "README.md"), DEPLOY_README, "utf-8");
+
+  // 6. Commit + push using the caller's global git identity (must be a verified
+  // email on the GitHub account that owns the deploy repo, otherwise Vercel
+  // will reject the deploy with "commit author email is not valid").
+  await runGit(["add", "."], DEPLOY_DIR);
+  const ts = new Date().toISOString();
+  try {
+    await runGit(["commit", "-m", `deploy: ${ts}`, "--allow-empty"], DEPLOY_DIR);
+  } catch (err) {
+    // commit can fail if there's truly nothing to commit and --allow-empty path was rejected by hooks; surface clearly
+    throw new Error(`commit failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await runGit(["push", "origin", branch], DEPLOY_DIR);
+
+  const sha = await runGit(["rev-parse", "HEAD"], DEPLOY_DIR);
+  return { sha, branch, remote };
 }
 
 function walkDistFiles(distDir: string): DeployFile[] {
