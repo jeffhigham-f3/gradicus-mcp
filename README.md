@@ -43,13 +43,16 @@ flowchart TD
 
 ## Installation
 
+This project uses [Yarn 4](https://yarnpkg.com/) (pinned via `packageManager` in `package.json` and Corepack). If you have a recent Node, run `corepack enable` once to activate the pinned Yarn version.
+
 ```bash
 git clone <this-repo>
 cd <this-repo>
-npm install
-npx playwright install chromium
-npm run build
-npm run build:icons     # one-off: regenerates PWA icons from report/static/icons/source.png
+corepack enable              # one-off: activates the pinned Yarn 4
+yarn install
+yarn playwright install chromium
+yarn build
+yarn build:icons             # one-off: regenerates PWA icons from report/static/icons/source.png
 ```
 
 ## Configuration
@@ -60,32 +63,107 @@ The server reads credentials and deploy options from environment variables. None
 | --- | --- | --- |
 | `GRADICUS_EMAIL` | yes | Portal account email |
 | `GRADICUS_PASSWORD` | yes | Portal account password |
-| `NETLIFY_AUTH_TOKEN` | optional | Personal access token; only needed when deploying via `deploy_to: "netlify"` |
+| `MCP_AUTH_TOKEN` | yes (HTTP) | Shared bearer token. Generate with `openssl rand -base64 48`. Server refuses to start if missing or shorter than 32 chars |
+| `MCP_ALLOWED_ORIGINS` | optional | Comma-separated list of `Origin` headers to allow. Leave unset to accept any (most MCP clients omit `Origin`) |
+| `HOST` | optional | Bind address. Defaults to `127.0.0.1`. Docker sets it to `0.0.0.0` so the compose bridge can reach the app |
+| `PORT` | optional | Listen port. Default `3000` |
+| `DATA_DIR` | optional | Where the SQLite cache lives. Default `<repo>/data`. Docker sets it to `/data` |
+| `CADDY_DOMAIN` | yes (prod) | Public hostname Caddy serves and obtains a Let's Encrypt cert for |
+| `GRADICUS_DEBUG_TOOLS` | optional | Set to `1` to expose `debug_page` / `debug_email_page`. Off by default — they dump raw scraped HTML containing PII |
+| `NETLIFY_AUTH_TOKEN` | optional | Personal access token; only needed when `daily_report` uses `deploy_to: "netlify"` |
 | `NETLIFY_SITE_ID` | optional | Override the default Netlify site ID |
-| `GRADICUS_DEPLOY_REMOTE` | optional | Git remote (SSH or HTTPS) for the deploy repo. Defaults to a hard-coded value in `src/index.ts` — change it to your repo before first use |
+| `GRADICUS_DEPLOY_REMOTE` | optional | Git remote (SSH or HTTPS) for the deploy repo. Defaults to a hard-coded value in `src/index.ts` — change it to your repo before first use. **Note:** the `git` deploy path needs an SSH key with write access mounted into the container, so on Docker/EC2 the supported remote path is `deploy_to: "netlify"` |
 
 Secrets must never be committed. `.env` and `.cursor/mcp.json` are git-ignored by default.
 
-## Registering the MCP server
+## Running the server
 
-Add an entry to your MCP host's configuration. Generic shape:
+Two modes are supported: local HTTP for dev, and a containerised public-internet deployment for use from any AI agent.
+
+### Local Docker
+
+```bash
+cp .env.example .env
+# fill in MCP_AUTH_TOKEN (openssl rand -base64 48), GRADICUS_EMAIL, GRADICUS_PASSWORD
+
+docker compose up --build           # uses docker-compose.override.yml, app on localhost:3000
+curl http://localhost:3000/healthz  # 200 OK
+```
+
+The override file publishes the app on `127.0.0.1:3000` and disables Caddy. To run the production stack locally (with Caddy + TLS) bypass the override:
+
+```bash
+docker compose -f docker-compose.yml up --build
+```
+
+### Public deployment (EC2 + Caddy + Let's Encrypt)
+
+See [`deploy/ec2/README.md`](deploy/ec2/README.md) for the step-by-step runbook. Summary:
+
+1. Push secrets to AWS SSM Parameter Store (`MCP_AUTH_TOKEN`, `GRADICUS_EMAIL`, `GRADICUS_PASSWORD`, `CADDY_DOMAIN`).
+2. Launch a `t3.small` Amazon Linux 2023 instance with the SSM read role attached and `deploy/ec2/cloud-init.yaml` as the user-data.
+3. Add an `A` record pointing your `CADDY_DOMAIN` at the instance's Elastic IP.
+4. Caddy auto-provisions a Let's Encrypt cert on first request.
+
+## Connecting from an AI agent
+
+### Remote (HTTP) — recommended
+
+Add this to your MCP client's config (works with Cursor, Claude Desktop, ChatGPT MCP, and any other client that supports remote MCP servers with custom headers):
 
 ```jsonc
 {
   "mcpServers": {
     "gradicus": {
-      "command": "node",
-      "args": ["/absolute/path/to/this-repo/dist/index.js"],
-      "env": {
-        "GRADICUS_EMAIL": "...",
-        "GRADICUS_PASSWORD": "..."
+      "url": "https://gradicus-mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_MCP_AUTH_TOKEN>"
       }
     }
   }
 }
 ```
 
-After saving, refresh the MCP host so it picks up the new server. Most hosts namespace tool calls (e.g. `gradicus.login`, `gradicus.daily_report`).
+For local Docker dev, swap the URL to `http://localhost:3000/mcp`.
+
+### Local stdio (legacy)
+
+The previous stdio entry-point has been removed; the server now only speaks Streamable HTTP. To run it as a local-only MCP server, point your client at the local Docker URL above. There is no longer a `command + args` form.
+
+### Rotating the bearer token
+
+```bash
+# 1. New token
+NEW="$(openssl rand -base64 48)"
+
+# 2. Update SSM (production) or .env (local)
+aws ssm put-parameter --overwrite --type SecureString \
+  --name /gradicus/MCP_AUTH_TOKEN --value "$NEW"
+
+# 3. Re-run the bootstrap script (re-pulls SSM into .env) and restart the app
+ssh ec2-user@gradicus-mcp.example.com \
+  'sudo /usr/local/bin/gradicus-bootstrap.sh && sudo docker compose -f /opt/gradicus/docker-compose.yml up -d'
+
+# 4. Update the Authorization header in every AI agent client.
+```
+
+## Security model (MVP)
+
+- HTTPS-only (Caddy + Let's Encrypt, auto-renewing) in production.
+- Single shared bearer token, constant-time compared (`timingSafeEqual`), fail-closed: server refuses to start if `MCP_AUTH_TOKEN` is missing or shorter than 32 chars.
+- App container has no published ports; only Caddy is reachable from the public internet.
+- `Origin` header validation is available via `MCP_ALLOWED_ORIGINS` for defense-in-depth against DNS rebinding.
+- Secrets out of the image, in SSM Parameter Store (or a `chmod 600` `.env` file on the host).
+- Non-root container user (`pwuser` from the Playwright base image).
+- Debug tools (`debug_page`, `debug_email_page`) are off by default; enable with `GRADICUS_DEBUG_TOOLS=1` in trusted local environments only.
+
+Explicit non-goals for the MVP (call out as follow-ups):
+
+- OAuth 2.1 / per-user identity
+- Per-tool authorization
+- Rate limiting and abuse protection (single-user, low-traffic — add later via Caddy `rate_limit` if needed)
+- Audit logging beyond Caddy's access log
+- WAF / CloudFront in front of the instance
 
 ## MCP Tool Surface
 
@@ -201,7 +279,7 @@ report/
   static/               PWA assets copied verbatim into dist/
     manifest.webmanifest
     sw.js
-    icons/              PNG/SVG icon set (regenerate via npm run build:icons)
+    icons/              PNG/SVG icon set (regenerate via yarn build:icons)
     _headers            Headers for Netlify-only deploys
   dist/                 Generated output (git-ignored)
 scripts/
@@ -215,11 +293,11 @@ data/                   SQLite cache (git-ignored)
 
 | Command | Purpose |
 | --- | --- |
-| `npm run build` | Compile TypeScript to `dist/` |
-| `npm run start` | Run the MCP server on stdio |
-| `npm run report` | Build the HTML report locally without deploying |
-| `npm run deploy` | One-shot driver: login → sync → daily_report (uses `.env`) |
-| `npm run build:icons` | Regenerate PWA icons from the source PNG |
+| `yarn build` | Compile TypeScript to `dist/` |
+| `yarn start` | Run the MCP server on stdio |
+| `yarn report` | Build the HTML report locally without deploying |
+| `yarn deploy` | One-shot driver: login → sync → daily_report (uses `.env`) |
+| `yarn build:icons` | Regenerate PWA icons from the source PNG |
 
 ## Privacy & Security
 
