@@ -671,11 +671,11 @@ function renderPanel(s, i) {
   ${renderAiInsight(s)}
   ${renderStatusBanner(s.status)}
   ${renderPriorities(s.priorities)}
+  ${renderHomework(s)}
   ${renderOverview(s, i)}
   ${renderGrades(s)}
   ${renderTeacherComments(s)}
   ${renderAssignments(s)}
-  ${renderHomework(s)}
   ${renderAttendance(s, i)}
   ${renderDemerits(s, i)}
   ${renderEmails(s)}

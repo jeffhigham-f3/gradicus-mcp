@@ -18,7 +18,7 @@
 // as the source so the masked icon never shows transparent corners.
 //
 // Usage: node scripts/build-icons.mjs
-//        npm run build:icons
+//        yarn build:icons
 
 import sharp from 'sharp';
 import { dirname, join } from 'path';
