@@ -813,12 +813,14 @@ async function deployToGit(distDir: string, remote: string): Promise<GitDeployRe
     } catch {
       await runGit(["remote", "add", "origin", remote], DEPLOY_DIR);
     }
-    // Pull latest so our push isn't rejected non-fast-forward
+    // Pull latest so our push isn't rejected non-fast-forward.
+    // Shallow clones: plain `fetch origin` often leaves refs/remotes/origin/main stale;
+    // always fetch the branch we deploy (main on gradicus-deploy).
     try {
-      await runGit(["fetch", "origin"], DEPLOY_DIR);
-      // Reset to origin's default branch (handle empty repo gracefully)
+      await runGit(["fetch", "--depth", "1", "origin", "main"], DEPLOY_DIR);
+      // Reset to origin/main (handle empty repo gracefully)
       try {
-        await runGit(["reset", "--hard", "origin/HEAD"], DEPLOY_DIR);
+        await runGit(["reset", "--hard", "origin/main"], DEPLOY_DIR);
       } catch {
         // Fresh repo with no commits yet — that's fine, we'll create the first
       }
