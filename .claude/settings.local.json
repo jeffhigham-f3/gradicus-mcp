@@ -32,7 +32,13 @@
       "Bash(git -C /Users/jeffh/Sites/Gradicus/.deploy log --oneline -3 main)",
       "Bash(git -C /Users/jeffh/Sites/Gradicus/.deploy rev-list --left-right --count main...origin/main)",
       "Bash(git *)",
-      "Bash(rsync -a --delete --exclude='.git' --exclude='README.md' --exclude='vercel.json' /Users/jeffh/Sites/Gradicus/report/dist/ /Users/jeffh/Sites/Gradicus/.deploy/)"
+      "Bash(rsync -a --delete --exclude='.git' --exclude='README.md' --exclude='vercel.json' /Users/jeffh/Sites/Gradicus/report/dist/ /Users/jeffh/Sites/Gradicus/.deploy/)",
+      "Bash(/Users/jeffh/.nvm/versions/node/v24.2.0/bin/npx tsc *)",
+      "Bash(claude mcp *)",
+      "Bash(/Users/jeffh/.nvm/versions/node/v24.2.0/bin/node /Users/jeffh/Sites/Gradicus/dist/index.js)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "mcp__gradicus__sync"
     ]
   }
 }

@@ -12,7 +12,7 @@ const STATIC_DIR = join(__dirname, 'static');
 
 // Recursively copy report/static/* into report/dist/, preserving subdirectories.
 // Called after the main HTML is written so the PWA shell (manifest, sw.js,
-// icons) ends up in dist/ and Netlify deploys them with the rest.
+// icons) ends up in dist/ and Vercel deploys them with the rest.
 function cpStaticAssets(srcDir, destDir) {
   let entries;
   try { entries = readdirSync(srcDir); } catch { return 0; }

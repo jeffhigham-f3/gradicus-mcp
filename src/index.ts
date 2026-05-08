@@ -2,9 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawn } from "child_process";
-import { createHash } from "crypto";
-import { readFileSync, readdirSync, statSync, existsSync, rmSync, writeFileSync, mkdirSync, copyFileSync } from "fs";
-import { dirname, join, relative } from "path";
+import { readdirSync, statSync, existsSync, rmSync, writeFileSync, mkdirSync, copyFileSync } from "fs";
+import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { GradicusScraper } from "./scraper.js";
 import { GradicusCache } from "./cache.js";
@@ -12,8 +11,9 @@ import { StudentReport, StudentSchedule, DemeritHistory, AttendanceReport, Email
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..");
-const DEFAULT_NETLIFY_SITE_ID = "13e4d96b-833c-4950-9e0c-f2dbca58a807";
 const DEFAULT_DEPLOY_REMOTE = "git@github.com:jeffhigham-f3/gradicus-deploy.git";
+const DEFAULT_REPORT_URL = "https://gradicus-deploy.vercel.app";
+const REPORT_URL = process.env.GRADICUS_REPORT_URL || DEFAULT_REPORT_URL;
 const DEPLOY_DIR = join(PROJECT_ROOT, ".deploy");
 /** Author for deploy-repo commits (Vercel/GitHub require a verified email). */
 const DEPLOY_GIT_AUTHOR_NAME = "Jeff Higham";
@@ -554,14 +554,13 @@ server.tool(
   "Generate a visual daily report (HTML, charts, today's priorities) for all students and optionally deploy it. Default deploy target is Git (pushes report/dist to a deploy repo that Vercel watches). Pass `insights` (a map of student name → one-paragraph LLM-generated insight) to have a per-student summary card rendered prominently at the top of each panel; the calling LLM is expected to author each paragraph fresh based on the latest data.",
   {
     sync: z.boolean().optional().describe("Refresh data from Gradicus before building the report. Default: true if logged in, false otherwise."),
-    deploy: z.boolean().optional().describe("Deploy the built report. Default: true when a deploy target is configured (NETLIFY_AUTH_TOKEN for netlify, or git remote configured)."),
-    deploy_to: z.enum(["git", "netlify", "both", "none"]).optional().describe("Where to deploy: 'git' pushes report/dist to the deploy repo (Vercel auto-deploys); 'netlify' uses the Netlify file-digest API; 'both' does both; 'none' skips deploy. Default: 'git'."),
+    deploy: z.boolean().optional().describe("Deploy the built report. Default: true unless deploy_to is 'none'."),
+    deploy_to: z.enum(["git", "none"]).optional().describe("Where to deploy: 'git' (default) pushes report/dist to the deploy repo (Vercel auto-deploys); 'none' skips deploy."),
     git_remote: z.string().optional().describe("SSH/HTTPS URL of the deploy repo. Defaults to git@github.com:jeffhigham-f3/gradicus-deploy.git."),
-    site_id: z.string().optional().describe("Override the Netlify site ID (only used when deploy_to includes 'netlify')."),
     insights: z.record(z.string(), z.string()).optional().describe("Map of student name (or partial first/last name match) to a one-paragraph insight written by the calling LLM. Each insight should cover what the student is doing well, the most important area to improve, and one or two concrete actions parents can take at home this week. Plain prose only — no markdown."),
     family_insight: z.string().optional().describe("One- or two-paragraph household-level insight written by the calling LLM, considering family dynamics, student ages, cross-grade patterns, and concrete ways stronger students can support weaker ones in their areas of strength. Renders prominently in the Summary tab above the per-student cards. Plain prose only — no markdown."),
   },
-  async ({ sync, deploy, deploy_to, git_remote, site_id, insights, family_insight }) => {
+  async ({ sync, deploy, deploy_to, git_remote, insights, family_insight }) => {
     const lines: string[] = [];
     const distDir = join(PROJECT_ROOT, "report", "dist");
     const indexPath = join(distDir, "index.html");
@@ -617,8 +616,6 @@ server.tool(
     }
 
     const target = deploy_to || "git";
-    const token = process.env.NETLIFY_AUTH_TOKEN;
-    const siteId = site_id || process.env.NETLIFY_SITE_ID || DEFAULT_NETLIFY_SITE_ID;
     const remote = git_remote || process.env.GRADICUS_DEPLOY_REMOTE || DEFAULT_DEPLOY_REMOTE;
     const shouldDeploy = deploy !== undefined ? deploy : (target !== "none");
 
@@ -629,35 +626,15 @@ server.tool(
 
     let anyError = false;
 
-    if (target === "git" || target === "both") {
-      lines.push(`\nDeploying to Git (${remote})...`);
-      try {
-        const result = await deployToGit(distDir, remote);
-        lines.push(`  Pushed commit ${result.sha.slice(0, 8)} to ${result.branch}`);
-        lines.push(`  Vercel will auto-deploy from this push (typically 5-15s).`);
-      } catch (err) {
-        anyError = true;
-        lines.push(`Git deploy failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    if (target === "netlify" || target === "both") {
-      if (!token) {
-        lines.push(
-          `\nNetlify deploy requested but NETLIFY_AUTH_TOKEN is not set. Add it to the gradicus MCP env in ~/.cursor/mcp.json (or shell env).`
-        );
-        if (target === "netlify") anyError = true;
-      } else {
-        lines.push(`\nDeploying to Netlify (site ${siteId})...`);
-        try {
-          const result = await deployToNetlify(distDir, siteId, token);
-          lines.push(`  Live: ${result.url}`);
-          lines.push(`  Deploy ID: ${result.id}`);
-        } catch (err) {
-          anyError = true;
-          lines.push(`Netlify deploy failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
+    lines.push(`\nDeploying to Git (${remote})...`);
+    try {
+      const result = await deployToGit(distDir, remote);
+      lines.push(`  Pushed commit ${result.sha.slice(0, 8)} to ${result.branch}`);
+      lines.push(`  Vercel will auto-deploy from this push (typically 5-15s).`);
+      lines.push(`  Live: ${REPORT_URL}`);
+    } catch (err) {
+      anyError = true;
+      lines.push(`Git deploy failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     if (anyError) {
@@ -698,12 +675,6 @@ function runReportGenerator(
   });
 }
 
-interface DeployFile {
-  path: string;
-  content: Buffer;
-  sha1: string;
-}
-
 // --- Git deploy ---
 //
 // Maintains a local clone of the deploy repo at .deploy/. On each deploy:
@@ -711,7 +682,7 @@ interface DeployFile {
 //   2. Wipe the working tree (preserving .git/)
 //   3. Mirror report/dist/* into .deploy/
 //   4. Write/refresh vercel.json (so Vercel sets the right MIME + caching for
-//      the manifest, sw.js, and icons — equivalent to the Netlify _headers file)
+//      the manifest, sw.js, and icons)
 //   5. git add . && git commit (--allow-empty so empty diffs still push) && git push
 //
 // Vercel watches the deploy repo and auto-deploys.
@@ -814,13 +785,12 @@ async function deployToGit(distDir: string, remote: string): Promise<GitDeployRe
       await runGit(["remote", "add", "origin", remote], DEPLOY_DIR);
     }
     // Pull latest so our push isn't rejected non-fast-forward.
-    // Shallow clones: plain `fetch origin` often leaves refs/remotes/origin/main stale;
-    // always fetch the branch we deploy (main on gradicus-deploy).
+    // Shallow `fetch origin main` updates FETCH_HEAD but often does not move
+    // refs/remotes/origin/main — reset to FETCH_HEAD so we match GitHub's tip.
     try {
       await runGit(["fetch", "--depth", "1", "origin", "main"], DEPLOY_DIR);
-      // Reset to origin/main (handle empty repo gracefully)
       try {
-        await runGit(["reset", "--hard", "origin/main"], DEPLOY_DIR);
+        await runGit(["reset", "--hard", "FETCH_HEAD"], DEPLOY_DIR);
       } catch {
         // Fresh repo with no commits yet — that's fine, we'll create the first
       }
@@ -858,6 +828,8 @@ async function deployToGit(distDir: string, remote: string): Promise<GitDeployRe
         `user.name=${DEPLOY_GIT_AUTHOR_NAME}`,
         "-c",
         `user.email=${DEPLOY_GIT_AUTHOR_EMAIL}`,
+        "-c",
+        "commit.gpgsign=false",
         "commit",
         "-m",
         `deploy: ${ts}`,
@@ -873,82 +845,6 @@ async function deployToGit(distDir: string, remote: string): Promise<GitDeployRe
 
   const sha = await runGit(["rev-parse", "HEAD"], DEPLOY_DIR);
   return { sha, branch, remote };
-}
-
-function walkDistFiles(distDir: string): DeployFile[] {
-  const out: DeployFile[] = [];
-  function walk(dir: string) {
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name);
-      const st = statSync(full);
-      if (st.isDirectory()) walk(full);
-      else if (st.isFile()) {
-        const content = readFileSync(full);
-        const path = "/" + relative(distDir, full).replace(/\\/g, "/");
-        out.push({ path, content, sha1: createHash("sha1").update(content).digest("hex") });
-      }
-    }
-  }
-  walk(distDir);
-  return out;
-}
-
-interface NetlifyDeployResponse {
-  id: string;
-  required: string[];
-  deploy_url?: string;
-  deploy_ssl_url?: string;
-  ssl_url?: string;
-  url?: string;
-}
-
-async function deployToNetlify(
-  distDir: string,
-  siteId: string,
-  token: string
-): Promise<{ url: string; id: string }> {
-  const files = walkDistFiles(distDir);
-  if (files.length === 0) throw new Error(`No files found in ${distDir}`);
-
-  const fileMap: Record<string, string> = {};
-  for (const f of files) fileMap[f.path] = f.sha1;
-
-  const createResp = await fetch(`https://api.netlify.com/api/v1/sites/${siteId}/deploys`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ files: fileMap, async: false }),
-  });
-
-  if (!createResp.ok) {
-    throw new Error(`Netlify create-deploy failed: ${createResp.status} ${await createResp.text()}`);
-  }
-
-  const deploy = (await createResp.json()) as NetlifyDeployResponse;
-  const required = new Set(deploy.required || []);
-
-  for (const f of files) {
-    if (!required.has(f.sha1)) continue;
-    const upResp = await fetch(
-      `https://api.netlify.com/api/v1/deploys/${deploy.id}/files${f.path}`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/octet-stream",
-        },
-        body: new Uint8Array(f.content),
-      }
-    );
-    if (!upResp.ok) {
-      throw new Error(`Upload of ${f.path} failed: ${upResp.status} ${await upResp.text()}`);
-    }
-  }
-
-  const url = deploy.deploy_ssl_url || deploy.ssl_url || deploy.deploy_url || deploy.url || "";
-  return { url, id: deploy.id };
 }
 
 // --- Formatting helpers ---

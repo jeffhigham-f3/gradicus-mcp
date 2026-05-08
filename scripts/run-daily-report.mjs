@@ -6,13 +6,11 @@
 //   node scripts/run-daily-report.mjs                # sync + deploy
 //   node scripts/run-daily-report.mjs --no-sync      # use cached data
 //   node scripts/run-daily-report.mjs --no-deploy    # generate only
-//   node scripts/run-daily-report.mjs --site <id>    # override site id
 //
-// Required env (when deploying):
-//   NETLIFY_AUTH_TOKEN  Netlify personal access token
-// Optional:
+// Optional env:
 //   GRADICUS_EMAIL / GRADICUS_PASSWORD  needed when syncing
-//   NETLIFY_SITE_ID                     overrides the default site
+//   GRADICUS_DEPLOY_REMOTE              overrides the default deploy git remote
+//   GRADICUS_REPORT_URL                 overrides the live report URL echoed after deploy
 
 import { spawn } from 'child_process';
 import { dirname, join } from 'path';
@@ -25,11 +23,8 @@ const SERVER_ENTRY = join(PROJECT_ROOT, 'dist', 'index.js');
 const argv = process.argv.slice(2);
 const noSync = argv.includes('--no-sync');
 const noDeploy = argv.includes('--no-deploy');
-const siteIdx = argv.indexOf('--site');
-const siteOverride = siteIdx >= 0 ? argv[siteIdx + 1] : undefined;
 
 const args = { sync: !noSync, deploy: !noDeploy };
-if (siteOverride) args.site_id = siteOverride;
 
 function callTool(toolName, toolArgs) {
   return new Promise((resolve, reject) => {
@@ -92,10 +87,6 @@ async function main() {
   if (!noSync && (!process.env.GRADICUS_EMAIL || !process.env.GRADICUS_PASSWORD)) {
     console.warn('[warn] GRADICUS_EMAIL/GRADICUS_PASSWORD not set; sync will fail. Pass --no-sync to use cached data.');
   }
-  if (!noDeploy && !process.env.NETLIFY_AUTH_TOKEN) {
-    console.warn('[warn] NETLIFY_AUTH_TOKEN not set; deploy will be skipped by the tool.');
-  }
-
   // Login first (only if we plan to sync). The daily_report tool requires
   // an authenticated session for sync=true.
   if (!noSync) {

@@ -13,7 +13,7 @@ The server logs into a Gradicus-style school portal, scrapes per-student grades,
 - **ChatGPT-style streaming UI.** Insights stream in chunk-by-chunk on page load with a blinking caret, naturally irregular pacing, and proper punctuation pauses. Click to skip, fully respects `prefers-reduced-motion`.
 - **Material 3 / 2026-modern interface.** Sticky condensed app bar, hamburger drawer with active-student chip, ripple state layers, summary FAB, light/dark/auto theming with a manual toggle, and explicit responsive breakpoints from 480px to 1280px+.
 - **Installable PWA.** Web App Manifest, service worker (network-first for HTML, cache-first for shell), Apple touch icon, maskable Android adaptive icons, in-app install prompt for Chrome/Edge, native instructions for iOS Safari, and an offline banner that shows the cached report's date.
-- **Pluggable deploy.** Generates a static `dist/` and pushes it via Git (default — any provider that auto-deploys from a repo) or directly via the Netlify file-digest API.
+- **Git-based deploy.** Generates a static `dist/` and pushes it to a deploy repo that any Git-watching static host (Vercel, Cloudflare Pages, etc.) auto-deploys.
 
 ## Architecture
 
@@ -31,7 +31,6 @@ flowchart TD
   Generator --> Dist["report/dist (HTML + PWA assets)"]
 
   Server -->|deploy_to git| GitRepo["Deploy repo"] --> Vercel["Vercel auto-deploy"]
-  Server -->|deploy_to netlify| Netlify["Netlify file-digest API"]
 ```
 
 ## Requirements
@@ -39,7 +38,7 @@ flowchart TD
 - Node.js 20.10+ (Node 22 recommended; the local SQLite native module is ABI-versioned to whatever Node runs the MCP)
 - A modern browser engine for the scraper (installed automatically via Playwright)
 - A school-portal account
-- Optional: a static-host account (Vercel, Netlify, or any provider that watches a Git repo)
+- Optional: a static-host account (Vercel, Cloudflare Pages, or any provider that watches a Git repo)
 
 ## Installation
 
@@ -60,9 +59,8 @@ The server reads credentials and deploy options from environment variables. None
 | --- | --- | --- |
 | `GRADICUS_EMAIL` | yes | Portal account email |
 | `GRADICUS_PASSWORD` | yes | Portal account password |
-| `NETLIFY_AUTH_TOKEN` | optional | Personal access token; only needed when deploying via `deploy_to: "netlify"` |
-| `NETLIFY_SITE_ID` | optional | Override the default Netlify site ID |
 | `GRADICUS_DEPLOY_REMOTE` | optional | Git remote (SSH or HTTPS) for the deploy repo. Defaults to a hard-coded value in `src/index.ts` — change it to your repo before first use |
+| `GRADICUS_REPORT_URL` | optional | Live URL of the deployed report. Echoed back in the `daily_report` response so callers know where to look. Defaults to `https://gradicus-deploy.vercel.app` |
 
 Secrets must never be committed. `.env` and `.cursor/mcp.json` are git-ignored by default.
 
@@ -111,10 +109,9 @@ After saving, refresh the MCP host so it picks up the new server. Most hosts nam
 | Param | Default | Description |
 | --- | --- | --- |
 | `sync` | `true` if logged in | Re-sync every student before building |
-| `deploy` | `true` if any target is configured | Push the built report |
-| `deploy_to` | `"git"` | One of `"git"`, `"netlify"`, `"both"`, `"none"` |
+| `deploy` | `true` unless `deploy_to` is `"none"` | Push the built report |
+| `deploy_to` | `"git"` | One of `"git"` or `"none"` |
 | `git_remote` | env or built-in default | Override the deploy repo URL |
-| `site_id` | env or built-in default | Override the Netlify site ID |
 | `insights` | — | Map of `{ studentName: paragraph }` written by the calling LLM |
 | `family_insight` | — | One- or two-paragraph household-level insight |
 
@@ -157,7 +154,7 @@ Summary tab:
 
 ## Deployment
 
-Two paths are supported side-by-side. The preferred default is Git → static host because it leaves no API keys in the MCP server and gives you free preview deploys + rollbacks.
+Deploys go through Git → static host. This leaves no API keys in the MCP server and gives you free preview deploys + rollbacks.
 
 ### Git → static host (default)
 
@@ -165,13 +162,8 @@ Two paths are supported side-by-side. The preferred default is Git → static ho
 2. Set `GRADICUS_DEPLOY_REMOTE` to the SSH or HTTPS URL of that repo.
 3. Make sure your local `git config user.email` matches a verified email on your GitHub account (otherwise some hosts will reject the deploy).
 4. Connect the repo to your static host (Vercel / Cloudflare Pages / similar) as an "Other / Static" project with no build command and the repo root as the output directory.
-5. Run `daily_report (deploy_to: "git")` — the tool clones the repo into a local `.deploy/` directory, mirrors the latest `dist/` into it, writes a `vercel.json` for proper MIME types and PWA caching, commits with a timestamped message, and pushes. Your host auto-deploys.
-
-### Netlify
-
-1. Create a Netlify site and a personal access token.
-2. Set `NETLIFY_AUTH_TOKEN` (and optionally `NETLIFY_SITE_ID`) in the MCP env.
-3. Run `daily_report (deploy_to: "netlify")`. The tool uses the file-digest API to upload only changed files.
+5. Set `GRADICUS_REPORT_URL` to the live URL the host gave you so the tool echoes it after each deploy.
+6. Run `daily_report (deploy_to: "git")` — the tool clones the repo into a local `.deploy/` directory, mirrors the latest `dist/` into it, writes a `vercel.json` for proper MIME types and PWA caching, commits with a timestamped message, and pushes. Your host auto-deploys.
 
 ### Local-only
 
@@ -202,7 +194,6 @@ report/
     manifest.webmanifest
     sw.js
     icons/              PNG/SVG icon set (regenerate via npm run build:icons)
-    _headers            Headers for Netlify-only deploys
   dist/                 Generated output (git-ignored)
 scripts/
   build-icons.mjs       Resizes report/static/icons/source.png into all sizes
